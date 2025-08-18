@@ -4,9 +4,6 @@ from django.utils.timezone import datetime
 
 
 class Node(models.Model):
-    """
-    node
-    """
     name = models.CharField(max_length=100, verbose_name="节点名称", unique=True)
     ip = models.GenericIPAddressField(verbose_name="IP地址")
     port = models.IntegerField(default=6800, blank=True, null=True)
@@ -50,8 +47,8 @@ class Project(models.Model):
 
 
 class Spider(models.Model):
-    project = models.ForeignKey(Project, on_delete=models.DO_NOTHING, verbose_name="爬虫")
-    name = models.CharField(max_length=255, default=None)
+    project = models.ForeignKey(Project, on_delete=models.DO_NOTHING, verbose_name="项目")
+    name = models.CharField(max_length=255, verbose_name="爬虫名称")
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
@@ -62,6 +59,21 @@ class Spider(models.Model):
         db_table = "scrapy_spider"
         verbose_name = verbose_name_plural = "Scrapy Spider"
         unique_together = (("project", "name"),)
+
+
+class SpiderGroup(models.Model):
+    spiders = models.ManyToManyField(Spider, verbose_name="爬虫")
+    name = models.CharField(max_length=255, verbose_name="任务组名称", unique=True)
+    description = models.TextField(blank=True, null=True, verbose_name="任务组描述")
+    create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
+    update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+
+    class Meta:
+        db_table = "scrapy_spider_group"
+        verbose_name = verbose_name_plural = "Scrapy Spider Group"
+
+    def __str__(self):
+        return self.name
 
 
 class Job(models.Model):
