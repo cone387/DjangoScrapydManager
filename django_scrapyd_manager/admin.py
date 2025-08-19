@@ -2,8 +2,34 @@
 from django.contrib import admin, messages
 from django.contrib.admin.views.main import ChangeList
 from django.shortcuts import get_object_or_404
+from datetime import datetime
 from . import models
 from . import scrapyd_api
+
+
+class CustomFilter(admin.SimpleListFilter):
+    def choices(self, changelist):
+        add_facets = changelist.add_facets
+        facet_counts = self.get_facet_queryset(changelist) if add_facets else None
+        for i, (lookup, title) in enumerate(self.lookup_choices):
+            if add_facets:
+                if (count := facet_counts.get(f"{i}__c", -1)) != -1:
+                    title = f"{title} ({count})"
+                else:
+                    title = f"{title} (-)"
+            yield {
+                "selected": self.value() == str(lookup),
+                "query_string": changelist.get_query_string(
+                    {self.parameter_name: lookup}
+                ),
+                "display": title,
+            }
+
+    def queryset(self, request, queryset):
+        value = self.value()
+        if value:
+            return queryset.filter(**{self.parameter_name: value})
+        return queryset
 
 
 @admin.register(models.Node)
@@ -12,27 +38,36 @@ class NodeAdmin(admin.ModelAdmin):
     readonly_fields = ("create_time", "update_time")
 
 
-class DefaultProjectChangeList(ChangeList):
-    def get_filters_params(self, params=None):
-        params = super().get_filters_params(params)
-        if 'node__id__exact' not in params:
-            node_id = models.Node.objects.all().values_list('id', flat=True).first()
-            if node_id:
-                params['node__id__exact'] = [node_id]
-        return params
+class ProjectNodeFilter(CustomFilter):
+    """右侧过滤：Node（节点）"""
+    title = "节点"
+    parameter_name = "node__id"
+
+    def lookups(self, request, model_admin):
+        return [(str(n.id), n.name) for n in models.Node.objects.all().order_by("name")]
+
+
+class ProjectFilter(CustomFilter):
+    """右侧过滤：Project（项目）"""
+    title = "项目"
+    parameter_name = "name"
+
+    def lookups(self, request, model_admin):
+        node_id = request.GET.get(ProjectNodeFilter.parameter_name)
+        if node_id:
+            projects = models.Project.objects.filter(node_id=node_id).values_list("name", flat=True).distinct().order_by("name")
+            return [(name, name) for name in projects]
+        return []
 
 
 @admin.register(models.Project)
 class ProjectAdmin(admin.ModelAdmin):
     list_display = ("name", "version", "create_time")
     readonly_fields = ("create_time", "update_time")
-    list_filter = ("node", )
-
-    def get_changelist(self, request, **kwargs):
-        return DefaultProjectChangeList
+    list_filter = (ProjectNodeFilter, ProjectFilter)
 
     def get_queryset(self, request):
-        node_id = request.GET.get("node__id__exact")
+        node_id = request.GET.get("node__id")
         if node_id:
             node = get_object_or_404(models.Node, pk=node_id)
         else:
@@ -44,116 +79,105 @@ class ProjectAdmin(admin.ModelAdmin):
         return get_object_or_404(models.Project, pk=object_id)
 
 
-class DefaultSpiderChangeList(ChangeList):
-    def get_filters_params(self, params=None):
-        params = super().get_filters_params(params)
-        # if 'project__node__id__exact' not in params:
-        #     node_id = models.Node.objects.all().values_list('id', flat=True).first()
-        #     if node_id:
-        #         params['project__node__id__exact'] = [node_id]
-        return params
-
-
-class NodeFilter(admin.SimpleListFilter):
+class SpiderNodeFilter(CustomFilter):
     """右侧过滤：Node（节点）"""
     title = "节点"
     # 使用与 Django 内置 FieldListFilter 一致的参数名，便于复用你已有的默认逻辑
-    parameter_name = "node_id"
+    parameter_name = "project__node_id"
+
+    default_node = models.Node.objects.order_by('name').first()
 
     def lookups(self, request, model_admin):
         # 列出所有节点
         return [(str(n.id), n.name) for n in models.Node.objects.all().order_by("name")]
 
-    def queryset(self, request, queryset):
-        node_id = self.value()
-        if node_id:
-            return queryset.filter(id=node_id)
-        return queryset
+    def value(self):
+        value = super().value()
+        if value is None:
+            if self.default_node:
+                return str(self.default_node.id)
+        return value
 
 
-class ProjectNameFilter(admin.SimpleListFilter):
+class ProjectNameFilter(CustomFilter):
     """右侧过滤：Project（按项目名，不含版本），受 Node 选择联动"""
     title = "项目"
     parameter_name = "project__name"
 
+    default_project = models.Project.objects.filter(node=SpiderNodeFilter.default_node).first()
+
     def lookups(self, request, model_admin):
         # 受已选 Node 影响，只展示该 Node 下的项目名（去重）
-        node_id = request.GET.get("project__node__id__exact")
+        node_id = request.GET.get(SpiderNodeFilter.parameter_name)
         qs = models.Project.objects.all()
         if node_id:
             qs = qs.filter(node__id=node_id)
         names = qs.values_list("name", flat=True).distinct().order_by("name")
         return [(name, name) for name in names]
 
-    def queryset(self, request, queryset):
-        name = self.value()
-        if name:
-            return queryset.filter(project__name=name)
-        return queryset
+    def value(self):
+        value = super().value()
+        if value is None:
+            first_project = models.Project.objects.filter(node=SpiderNodeFilter.default_node).order_by('name').first()
+            if first_project:
+                return first_project.name
+        return value
 
 
-# class ProjectVersionFilter(admin.SimpleListFilter):
-#     """右侧过滤：Version（项目版本），受 Node + Project 选择联动"""
-#     title = "版本"
-#     parameter_name = "version"
-#
-#     def lookups(self, request, model_admin):
-#         node_id = request.GET.get("project__node__id__exact")
-#         project_name = request.GET.get("project__name__exact")
-#         qs = models.Project.objects.all()
-#         if node_id:
-#             qs = qs.filter(node__id=node_id)
-#         if project_name:
-#             qs = qs.filter(name=project_name)
-#         versions = qs.values_list("version", flat=True).distinct().order_by("version")
-#         # 过滤空值，避免出现空选项
-#         return [(v, v) for v in versions if v]
-#
-#     def queryset(self, request, queryset):
-#         version = self.value()
-#         if version:
-#             return queryset.filter(project__version=version)
-#         return queryset
 
-class VersionListFilter(admin.SimpleListFilter):
-    title = "Version"
+class ProjectVersionFilter(CustomFilter):
+    """右侧过滤：Version（项目版本），受 Node + Project 选择联动"""
+    title = "版本"
     parameter_name = "project_version"
 
     def lookups(self, request, model_admin):
-        versions = models.Project.objects.values_list("version", flat=True).distinct()
-        return [(v, v) for v in versions if v]
+        node_id = request.GET.get(SpiderNodeFilter.parameter_name)
+        project_name = request.GET.get(ProjectNameFilter.parameter_name)
+        qs = models.Project.objects.all()
+        if node_id:
+            qs = qs.filter(node__id=node_id)
+        if project_name:
+            qs = qs.filter(name=project_name)
+        versions = qs.values_list("version", flat=True).distinct().order_by("version")
+        # 过滤空值，避免出现空选项
+        return [(v, f'{v}({datetime.fromtimestamp(int(v))})') for v in versions if v]
 
     def queryset(self, request, queryset):
-        value = self.value()
-        if not value:
-            default = models.Project.objects.values_list("version", flat=True).order_by("version").first()
-            if default:
-                return queryset.filter(project__version=default)
-            return queryset
-        return queryset.filter(project__version=value)
+        project__version = self.value()
+        if project__version:
+            return queryset.filter(project__version=project__version)
+        return queryset
 
 
 @admin.register(models.Spider)
 class SpiderAdmin(admin.ModelAdmin):
-    list_display = ("name", "project__name", "project__node__name", "create_time")
+    list_display = ("name", "project_name", "project_node_name", "create_time")
     readonly_fields = ("create_time", "update_time")
-    list_filter = (NodeFilter, ProjectNameFilter, VersionListFilter)
+    list_filter = (SpiderNodeFilter, ProjectNameFilter, ProjectVersionFilter)
 
-    def get_changelist(self, request, **kwargs):
-        return DefaultSpiderChangeList
+    def project_name(self, obj):
+        return obj.project.name
+    project_name.admin_order_field = "name"
+    project_name.short_description = "项目名称"
+
+    def project_node_name(self, obj):
+        return obj.project.node.name
+    project_node_name.admin_order_field = "project__node__name"
+    project_node_name.short_description = "节点名称"
 
     def get_queryset(self, request):
-        node_id = request.GET.get("project__node__id__exact")
+        node_id = request.GET.get(SpiderNodeFilter.parameter_name)
         if node_id:
             node = get_object_or_404(models.Node, pk=node_id)
         else:
-            return models.Spider.objects.none()
-        project_id = request.GET.get("project__id__exact")
+            node = SpiderNodeFilter.default_node
+        project_id = request.GET.get(ProjectNameFilter.parameter_name)
         if project_id:
-            project = get_object_or_404(models.Project, pk=project_id)
+            project = models.Project.objects.get(pk=project_id)
         else:
-            return models.Spider.objects.none()
-        scrapyd_api.list_project_spiders(project)
+            project = models.Project.objects.filter(node=node).first()
+        if project:
+            scrapyd_api.list_project_spiders(project)
         return super().get_queryset(request)
 
     def get_object(self, request, object_id, from_field = ...):
@@ -167,14 +191,66 @@ class SpiderGroupAdmin(admin.ModelAdmin):
     filter_horizontal = ("spiders",)
 
 
+class JobNodeFilter(CustomFilter):
+    """右侧过滤：Node（节点）"""
+    title = "节点"
+    parameter_name = "spider__project__node__id"
+
+    def lookups(self, request, model_admin):
+        return [(str(n.id), n.name) for n in models.Node.objects.all().order_by("name")]
+
+
+class JobProjectFilter(CustomFilter):
+    """右侧过滤：Project（项目）"""
+    title = "项目"
+    parameter_name = "spider__project__name"
+
+    def lookups(self, request, model_admin):
+        node_id = request.GET.get("spider__project__node__id")
+        if node_id:
+            project_names = models.Project.objects.filter(node_id=node_id).values_list("name", flat=True).distinct().order_by("name")
+            return [(name, name) for name in project_names]
+        return []
+
+
+class JobSpiderFilter(CustomFilter):
+    """右侧过滤：Spider（爬虫）"""
+    title = "爬虫"
+    parameter_name = "spider__id"
+
+    def lookups(self, request, model_admin):
+        node_id = request.GET.get("spider__project__node__id")
+        project_id = request.GET.get("spider__project__id")
+        if node_id and project_id:
+            spiders = models.Spider.objects.filter(project__node_id=node_id, project_id=project_id).order_by("name")
+            return [(str(s.id), s.name) for s in spiders]
+        return []
+
+
 @admin.register(models.Job)
 class JobAdmin(admin.ModelAdmin):
     list_display = (
-        "spider", "job_id", "start_time", "end_time", "status", "pid", "create_time"
+        "job_id", "job_spider", "start_time", "end_time", "status", "pid"
     )
-    readonly_fields = ("create_time", "update_time")
-    list_filter = ("spider__project__node", "spider__project", "status")
+    readonly_fields = ("create_time", "update_time", "start_time", "end_time", "pid", "log_url", "items_url", "spider", "status")
+    list_filter = ("status", JobNodeFilter, JobProjectFilter, JobSpiderFilter)
     actions = ["start_jobs", "stop_jobs"]
+    ordering = ("-status", "-start_time")
+
+    def job_node(self, obj):
+        return obj.spider.project.node.name
+    job_node.admin_order_field = "spider__project__node__name"
+    job_node.short_description = "节点名称"
+
+    def job_project(self, obj):
+        return obj.spider.project.name
+    job_project.admin_order_field = "spider__project__name"
+    job_project.short_description = "项目名称"
+
+    def job_spider(self, obj):
+        return obj.spider.name
+    job_spider.admin_order_field = "spider__name"
+    job_spider.short_description = "爬虫名称"
 
     def stop_jobs(self, request, queryset):
         """
@@ -194,13 +270,13 @@ class JobAdmin(admin.ModelAdmin):
 
 
     def get_queryset(self, request):
-        node_id = request.GET.get("spider__project__node__id__exact")
+        node_id = request.GET.get("spider__project__node__id")
         if node_id:
             node = get_object_or_404(models.Node, pk=node_id)
         else:
             return models.Job.objects.none()
         scrapyd_api.list_jobs(node)
-        return super().get_queryset(request)
+        return super().get_queryset(request).prefetch_related("spider", "spider__project", "spider__project__node")
 
     def get_object(self, request, object_id, from_field = ...):
         return get_object_or_404(models.Job, pk=object_id)

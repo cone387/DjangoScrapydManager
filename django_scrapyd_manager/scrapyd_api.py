@@ -119,6 +119,7 @@ def stop_spider_group(group: models.SpiderGroup) -> List[models.Job]:
     return jobs
 
 
+@ttl_cache()
 def list_jobs(node: models.Node) -> List[models.Job]:
     """列出节点上的所有任务并同步到数据库"""
     url = f"{node.url}/listjobs.json"
@@ -149,8 +150,8 @@ def list_jobs(node: models.Node) -> List[models.Job]:
                     defaults={
                         "status": status,
                         "pid": entry.get("pid"),
-                        "start_time": parse_datetime(entry.get("start_time")) or models.datetime.now(),
-                        "end_time": parse_datetime(entry.get("end_time")),
+                        "start_time": parse_datetime(entry.get("start_time")) if entry.get("start_time") else None,
+                        "end_time": parse_datetime(entry.get("end_time")) if entry.get("end_time") else None,
                         "log_url": entry.get("log_url"),
                         "items_url": entry.get("items_url"),
                     },

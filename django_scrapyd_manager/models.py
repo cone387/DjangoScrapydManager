@@ -31,7 +31,7 @@ class Node(models.Model):
 
 
 class Project(models.Model):
-    node = models.ForeignKey(Node, on_delete=models.DO_NOTHING, verbose_name="节点")
+    node = models.ForeignKey(Node, on_delete=models.DO_NOTHING, verbose_name="节点", db_constraint=False)
     name = models.CharField(max_length=255, default=None)
     version = models.CharField(max_length=255, default=None)
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
@@ -40,14 +40,14 @@ class Project(models.Model):
     class Meta:
         db_table = "scrapy_project"
         verbose_name = verbose_name_plural = "Scrapy Project"
-        # unique_together = (("node", "name", "version"),)
+        unique_together = (("node", "name", "version"),)
 
     def __str__(self):
         return self.name
 
 
 class Spider(models.Model):
-    project = models.ForeignKey(Project, on_delete=models.DO_NOTHING, verbose_name="项目")
+    project = models.ForeignKey(Project, on_delete=models.DO_NOTHING, verbose_name="项目", db_constraint=False)
     name = models.CharField(max_length=255, verbose_name="爬虫名称")
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
@@ -62,7 +62,7 @@ class Spider(models.Model):
 
 
 class SpiderGroup(models.Model):
-    spiders = models.ManyToManyField(Spider, verbose_name="爬虫")
+    spiders = models.ManyToManyField(Spider, verbose_name="爬虫", db_constraint=False)
     name = models.CharField(max_length=255, verbose_name="任务组名称", unique=True)
     description = models.TextField(blank=True, null=True, verbose_name="任务组描述")
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
@@ -77,10 +77,10 @@ class SpiderGroup(models.Model):
 
 
 class Job(models.Model):
-    spider = models.ForeignKey(Spider, on_delete=models.DO_NOTHING, verbose_name="爬虫")
+    spider = models.ForeignKey(Spider, on_delete=models.DO_NOTHING, verbose_name="爬虫", db_constraint=False)
     job_id = models.CharField(max_length=255, verbose_name="任务ID")
-    start_time = models.DateTimeField()
-    end_time = models.DateTimeField(null=True, blank=True)
+    start_time = models.DateTimeField(verbose_name="开始时间")
+    end_time = models.DateTimeField(null=True, blank=True, verbose_name="结束时间")
     log_url = models.CharField(max_length=255, null=True, blank=True)
     items_url = models.CharField(max_length=255, null=True, blank=True)
     status = models.CharField(max_length=20, verbose_name="状态")
