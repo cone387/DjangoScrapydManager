@@ -27,7 +27,7 @@ class Node(models.Model):
     def url(self):
         host = self.ip or "localhost"
         port = self.port or 6800
-        return f"http://{host}:{port}"
+        return f"{"https" if self.ssl else "http"}://{host}:{port}"
 
 
 class Project(models.Model):
@@ -53,7 +53,7 @@ class Spider(models.Model):
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
     def __str__(self):
-        return f"{self.name}@{self.project.name}"
+        return self.name
 
     class Meta:
         db_table = "scrapy_spider"
@@ -62,9 +62,11 @@ class Spider(models.Model):
 
 
 class SpiderGroup(models.Model):
-    spiders = models.ManyToManyField(Spider, verbose_name="爬虫", db_constraint=False)
     name = models.CharField(max_length=255, verbose_name="任务组名称", unique=True)
-    description = models.TextField(blank=True, null=True, verbose_name="任务组描述")
+    version = models.CharField(max_length=100, verbose_name='版本')
+    spiders = models.JSONField(default=list, verbose_name="爬虫")
+    kwargs = models.JSONField(default=dict, verbose_name="参数")
+    description = models.CharField(max_length=200, blank=True, null=True, verbose_name="任务组描述")
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 

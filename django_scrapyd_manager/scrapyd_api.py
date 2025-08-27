@@ -2,9 +2,12 @@
 import os
 import requests
 from typing import List
-from django.utils.dateparse import parse_datetime
+from logging import getLogger
 from .cache import ttl_cache
 from . import models
+from datetime import datetime
+
+logger = getLogger(__name__)
 
 
 def _auth_for_node(node: models.Node):
@@ -29,10 +32,10 @@ def start_spider(spider: models.Spider) -> models.Job | None:
     if not job_id:
         return None
 
-    job = models.Job.objects.create(
+    job = models.Job(
         spider=spider,
         job_id=job_id,
-        start_time=parse_datetime(result.get("start_time")) or models.datetime.now(),
+        start_time=models.datetime.now(),
         log_url=f"/logs/{spider.project.name}/{spider.name}/{job_id}.log",
         status="pending",
     )
@@ -120,43 +123,71 @@ def stop_spider_group(group: models.SpiderGroup) -> List[models.Job]:
 
 
 @ttl_cache()
+def get_job_info(job: models.Job) -> dict:
+    """获取某个任务的详细信息"""
+    url = f"{job.spider.project.node.url}/logs/{job.spider.project.name}/{job.spider.name}/{job.job_id}.json"
+    resp = requests.get(url, auth=_auth_for_node(job.spider.project.node), timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+
+
+@ttl_cache()
 def list_jobs(node: models.Node) -> List[models.Job]:
     """列出节点上的所有任务并同步到数据库"""
+    list_node_projects(node)
+    for project in models.Project.objects.filter(node=node):
+        list_project_spiders(project)
     url = f"{node.url}/listjobs.json"
-    projects = models.Project.objects.filter(node=node).values_list("name", flat=True)
+    projects = models.Project.objects.filter(node=node)
+
+    def match_job_spider(job_start_time: str, job_project_name, job_spider_name) -> models.Spider | None:
+        valid_projects = []
+        for p in projects.filter(name=job_project_name):
+            if not p.version.isdigit():
+                logger.warning("project version is not digit: %s@%s", p.name, p.version)
+                continue
+            version_datetime = datetime.fromtimestamp(int(p.version))
+            job_datetime = datetime.strptime(job_start_time, "%Y-%m-%d %H:%M:%S.%f")
+            if job_datetime > version_datetime:
+                valid_projects.append(p)
+        if not valid_projects:
+            raise ValueError(f"no valid version found for job {job_project_name}@{job_spider_name} started at {job_start_time}")
+        valid_projects.sort(key=lambda x: int(x.version), reverse=True)
+        target_project = valid_projects[0]
+        # 匹配spider
+        spider = models.Spider.objects.get(project=target_project, name=job_spider_name)
+        return spider
+
 
     jobs = []
-    for project_name in projects:
-        resp = requests.get(url, params={"project": project_name}, auth=_auth_for_node(node), timeout=15)
+    for project in projects:
+        resp = requests.get(url, params={"project": project.name}, auth=_auth_for_node(node), timeout=15)
         resp.raise_for_status()
         data = resp.json()
-
         for status, entries in data.items():
             if status not in ("pending", "running", "finished"):
                 continue
+
             for entry in entries:
-                job_id = entry.get("id")
-                spider_name = entry.get("spider")
-
-                spider = models.Spider.objects.filter(
-                    project__node=node, project__name=project_name, name=spider_name
-                ).first()
-                if not spider:
-                    continue
-
-                job, _ = models.Job.objects.update_or_create(
-                    job_id=job_id,
-                    spider=spider,
-                    defaults={
-                        "status": status,
-                        "pid": entry.get("pid"),
-                        "start_time": parse_datetime(entry.get("start_time")) if entry.get("start_time") else None,
-                        "end_time": parse_datetime(entry.get("end_time")) if entry.get("end_time") else None,
-                        "log_url": entry.get("log_url"),
-                        "items_url": entry.get("items_url"),
-                    },
+                spider_name = entry["spider"]
+                project_name = entry["project"]
+                start_time = entry["start_time"]
+                matched_spider = match_job_spider(start_time, project_name, spider_name)
+                job = models.Job(
+                    spider=matched_spider,
+                    start_time=start_time,
+                    job_id=entry.get("id"),
+                    end_time=entry.get("end_time"),
+                    items_url=entry.get("items_url"),
+                    log_url=entry.get("log_url"),
+                    pid=entry.get("pid"),
+                    status=status,
                 )
                 jobs.append(job)
+
+    deleted,  _ = models.Job.objects.filter(spider__project__node=node).delete()
+    models.Job.objects.bulk_create(jobs)
+    logger.info(f"deleted {deleted} old spiders, created {len(jobs)} new jobs for node {node}")
     return jobs
 
 
@@ -187,7 +218,10 @@ def list_node_projects(node: models.Node, include_version=True) -> List[models.P
                 results.append(models.Project(node=node, name=project_name, version=version))
     else:
         results = [models.Project(node=node, name=project_name) for project_name in projects]
-    models.Project.objects.bulk_create(results, ignore_conflicts=True)
+
+    deleted, _ = models.Project.objects.filter(node=node).delete()
+    models.Project.objects.bulk_create(results)
+    logger.info(f"deleted {deleted} old projects, created {len(projects)} new projects for node {node}")
     return results
 
 
@@ -195,12 +229,17 @@ def list_node_projects(node: models.Node, include_version=True) -> List[models.P
 def list_project_spiders(project: models.Project) -> List[models.Spider]:
     """列出某个项目的爬虫"""
     url = f"{project.node.url}/listspiders.json"
-    resp = requests.get(url, params={"project": project.name}, auth=_auth_for_node(project.node), timeout=15)
+    resp = requests.get(url, params={
+        "project": project.name,
+        "_version": project.version,
+    }, auth=_auth_for_node(project.node), timeout=15)
     resp.raise_for_status()
     data = resp.json()
     spiders = data.get("spiders", [])
     results = [models.Spider(project=project, name=spider) for spider in spiders]
-    models.Spider.objects.bulk_create(results, ignore_conflicts=True)
+    deleted, _ = models.Spider.objects.filter(project=project).delete()
+    models.Spider.objects.bulk_create(results)
+    logger.info(f"deleted {deleted} old spiders, created {len(spiders)} new spiders for project {project}")
     return results
 
 
