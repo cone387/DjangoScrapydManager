@@ -3,6 +3,7 @@ import os
 import requests
 from typing import List
 from logging import getLogger
+from django.db.models import Q
 from .cache import ttl_cache
 from . import models
 from datetime import datetime
@@ -54,7 +55,7 @@ def start_spiders(spiders: List[models.Spider]) -> List[models.Job]:
 
 def stop_spider(spider: models.Spider) -> List[models.Job] | None:
     """停止某个爬虫的所有任务"""
-    jobs = list_jobs(spider.project.node)
+    jobs = sync_jobs(spider.project.node)
     target_jobs = [j for j in jobs if j.spider == spider]
     stopped = []
     for job in target_jobs:
@@ -132,17 +133,17 @@ def get_job_info(job: models.Job) -> dict:
 
 
 @ttl_cache()
-def list_jobs(node: models.Node) -> List[models.Job]:
+def sync_jobs(node: models.Node) -> List[models.Job]:
     """列出节点上的所有任务并同步到数据库"""
-    list_node_projects(node)
+    sync_node_projects(node)
     for project in models.Project.objects.filter(node=node):
-        list_project_spiders(project)
+        sync_project_spiders(project)
     url = f"{node.url}/listjobs.json"
-    projects = models.Project.objects.filter(node=node)
+    project_names = models.Project.objects.filter(node=node).values_list("name", flat=True).distinct()
 
     def match_job_spider(job_start_time: str, job_project_name, job_spider_name) -> models.Spider | None:
         valid_projects = []
-        for p in projects.filter(name=job_project_name):
+        for p in models.Project.objects.filter(node=node, name=job_project_name):
             if not p.version.isdigit():
                 logger.warning("project version is not digit: %s@%s", p.name, p.version)
                 continue
@@ -153,15 +154,20 @@ def list_jobs(node: models.Node) -> List[models.Job]:
         if not valid_projects:
             raise ValueError(f"no valid version found for job {job_project_name}@{job_spider_name} started at {job_start_time}")
         valid_projects.sort(key=lambda x: int(x.version), reverse=True)
-        target_project = valid_projects[0]
         # 匹配spider
-        spider = models.Spider.objects.get(project=target_project, name=job_spider_name)
+        for p in valid_projects:
+            try:
+                spider = models.Spider.objects.get(project=p, name=job_spider_name)
+                break
+            except models.Spider.DoesNotExist:
+                continue
+        else:
+            raise ValueError(f"no valid project found for job {job_project_name}@{job_start_time}")
         return spider
 
-
     jobs = []
-    for project in projects:
-        resp = requests.get(url, params={"project": project.name}, auth=_auth_for_node(node), timeout=15)
+    for project_name in project_names:
+        resp = requests.get(url, params={"project": project_name}, auth=_auth_for_node(node), timeout=15)
         resp.raise_for_status()
         data = resp.json()
         for status, entries in data.items():
@@ -170,19 +176,19 @@ def list_jobs(node: models.Node) -> List[models.Job]:
 
             for entry in entries:
                 spider_name = entry["spider"]
-                project_name = entry["project"]
                 start_time = entry["start_time"]
                 matched_spider = match_job_spider(start_time, project_name, spider_name)
                 job = models.Job(
                     spider=matched_spider,
                     start_time=start_time,
-                    job_id=entry.get("id"),
+                    job_id=entry["id"],
                     end_time=entry.get("end_time"),
                     items_url=entry.get("items_url"),
                     log_url=entry.get("log_url"),
                     pid=entry.get("pid"),
                     status=status,
                 )
+                job.gen_md5()
                 jobs.append(job)
 
     deleted,  _ = models.Job.objects.filter(spider__project__node=node).delete()
@@ -201,46 +207,47 @@ def list_project_versions(project: models.Project) -> List[str]:
     return data.get("versions", [])
 
 
-@ttl_cache()
-def list_node_projects(node: models.Node, include_version=True) -> List[models.Project]:
+def sync_node_projects(node: models.Node, include_version=True):
     """列出某个节点上的项目，支持是否展开版本"""
     url = f"{node.url}/listprojects.json"
     resp = requests.get(url, auth=_auth_for_node(node), timeout=15)
     resp.raise_for_status()
     data = resp.json()
     projects = data.get("projects", [])
-    results = []
 
     if include_version:
         for project_name in projects:
-            versions = list_project_versions(models.Project(id=1, node=node, name=project_name))
+            # 这里ID不能用固定值，因为list_project_versions用了缓存 如果用固定值会走缓存
+            versions = list_project_versions(models.Project(id=f"{node.id}:{project_name}", node=node, name=project_name))
+            project_version_result = []
             for version in versions:
-                results.append(models.Project(node=node, name=project_name, version=version))
+                project_version_result.append(models.Project(node=node, name=project_name, version=version))
+            # 如果数据库中有当前list_project_versions中不存在的version，则将其重置为已删除状态
+            models.Project.objects.filter(~Q(version__in=versions), node=node, name=project_name).update(is_deleted=True)
+            models.Project.objects.bulk_create(project_version_result, ignore_conflicts=True)
+            logger.info(f"sync {len(project_version_result)} projects for node {node}")
     else:
-        results = [models.Project(node=node, name=project_name) for project_name in projects]
-
-    deleted, _ = models.Project.objects.filter(node=node).delete()
-    models.Project.objects.bulk_create(results)
-    logger.info(f"deleted {deleted} old projects, created {len(projects)} new projects for node {node}")
-    return results
+        raise NotImplementedError()
 
 
-@ttl_cache()
-def list_project_spiders(project: models.Project) -> List[models.Spider]:
+def sync_project_spiders(project: models.Project) -> bool:
     """列出某个项目的爬虫"""
-    url = f"{project.node.url}/listspiders.json"
-    resp = requests.get(url, params={
-        "project": project.name,
-        "_version": project.version,
-    }, auth=_auth_for_node(project.node), timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
-    spiders = data.get("spiders", [])
-    results = [models.Spider(project=project, name=spider) for spider in spiders]
-    deleted, _ = models.Spider.objects.filter(project=project).delete()
-    models.Spider.objects.bulk_create(results)
-    logger.info(f"deleted {deleted} old spiders, created {len(spiders)} new spiders for project {project}")
-    return results
+    if not project.is_spider_synced:
+        url = f"{project.node.url}/listspiders.json"
+        resp = requests.get(url, params={
+            "project": project.name,
+            "_version": project.version,
+        }, auth=_auth_for_node(project.node), timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        spiders = data.get("spiders", [])
+        results = [models.Spider(project=project, name=spider) for spider in spiders]
+        models.Spider.objects.bulk_create(results)
+        # 只需同步一次, 因为一个版本的spiders是不会变的
+        logger.info(f"synced {len(spiders)} spiders for project {project}")
+        project.is_spider_synced = True
+        project.save()
+    return project.is_spider_synced
 
 
 def add_version(project: models.Project, egg_path: str):
@@ -291,5 +298,5 @@ def node_info(node: models.Node) -> dict:
     """聚合节点的基本信息（状态、项目、版本、爬虫）"""
     return {
         "status": daemon_status(node),
-        "projects": list_node_projects(node, include_version=True),
+        "projects": sync_node_projects(node, include_version=True),
     }

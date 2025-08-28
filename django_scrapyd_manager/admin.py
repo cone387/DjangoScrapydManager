@@ -2,9 +2,16 @@
 from django.contrib import admin, messages
 from django.shortcuts import get_object_or_404
 from datetime import datetime
+from django.utils.html import format_html
+from django.urls import path
+from django.shortcuts import redirect
 from . import models
 from . import scrapyd_api
 from . import forms
+#
+# models.Spider.objects.all().delete()
+# models.Job.objects.all().delete()
+# models.Project.objects.all().delete()
 
 
 class CustomFilter(admin.SimpleListFilter):
@@ -34,14 +41,24 @@ class CustomFilter(admin.SimpleListFilter):
 
 @admin.register(models.Node)
 class NodeAdmin(admin.ModelAdmin):
-    list_display = ("name", "ip", "port", "description", "auth", "create_time")
+    list_display = ("name", "ip", "port", "description", "related_projects", "auth", "create_time")
     readonly_fields = ("create_time", "update_time")
+
+    def related_projects(self, obj: models.Node):
+        projects = []
+        for project in obj.projects.all()[:5]:
+            href = f"/admin/django_scrapyd_manager/project/?node_id={obj.id}"
+            projects.append(f"<a href='{href}'>{project.name}</a>")
+        if len(projects) == 5:
+            projects.append("···")
+        return format_html('<span style="line-height: 1">%s</span>' % '<br>'.join(projects))
+    related_projects.short_description = "项目"
 
 
 class ProjectNodeFilter(CustomFilter):
     """右侧过滤：Node（节点）"""
     title = "节点"
-    parameter_name = "node__id"
+    parameter_name = "node_id"
     default_node = models.Node.objects.order_by('name').first()
 
     def lookups(self, request, model_admin):
@@ -54,7 +71,6 @@ class ProjectFilter(CustomFilter):
     parameter_name = "name"
 
     node_filter = ProjectNodeFilter
-    default_project = models.Project.objects.filter(node=node_filter.default_node).first()
 
     def lookups(self, request, model_admin):
         node_id = request.GET.get(self.node_filter.parameter_name)
@@ -66,38 +82,53 @@ class ProjectFilter(CustomFilter):
 
 @admin.register(models.Project)
 class ProjectAdmin(admin.ModelAdmin):
-    list_display = ("name", "version", "create_time")
+    list_display = ("name", "linked_version", "spider_count", "is_spider_synced", "is_deleted", "create_time")
     readonly_fields = ("create_time", "update_time")
     list_filter = (ProjectNodeFilter, ProjectFilter)
 
-    def get_queryset(self, request):
-        node_id = request.GET.get("node__id")
-        if node_id:
-            node = get_object_or_404(models.Node, pk=node_id)
+    def linked_version(self, obj: models.Project):
+        if obj.version.isdigit():
+            version_datetime = datetime.fromtimestamp(int(obj.version))
         else:
-            return models.Project.objects.none()
-        scrapyd_api.list_node_projects(node)
-        return super().get_queryset(request)
+            version_datetime = obj.version
+        href = f"/admin/django_scrapyd_manager/spider/?project__name={obj.name}&project__node_id={obj.node.id}&project__version={obj.version}"
+        return format_html(f'<a href="{href}">{obj.version}({version_datetime})</a>')
+    linked_version.admin_order_field = "version"
+    linked_version.short_description = "版本"
+
+    def spider_count(self, obj: models.Project):
+        return obj.spiders.count()
+    spider_count.short_description = "爬虫数量"
+
+    def get_queryset(self, request):
+        node_id = request.GET.get(ProjectNodeFilter.parameter_name)
+        project_name = request.GET.get(ProjectFilter.parameter_name)
+        if node_id and project_name:
+            return models.Project.objects.filter(node_id=node_id, name=project_name).order_by("name")
+        return models.Project.objects.none()
 
     def get_object(self, request, object_id, from_field = ...):
         return get_object_or_404(models.Project, pk=object_id)
 
     def changelist_view(self, request, extra_context=None):
         # 如果 GET 中没有 node__id，则填充默认值
-        if ProjectNodeFilter.parameter_name not in request.GET:
-            default_node = models.Node.objects.order_by('name').first()
-            if default_node:
-                q = request.GET.copy()
-                q[ProjectNodeFilter.parameter_name] = str(default_node.id)
-                project_name = request.GET.get(ProjectFilter.parameter_name)
-                if not project_name:
-                    project = models.Project.objects.order_by('name').first()
-                    if project:
-                        project_name = project.name
-                        q[ProjectFilter.parameter_name] = project_name
-                request.GET = q
+        node_id = request.GET.get(ProjectNodeFilter.parameter_name)
+        project_name = request.GET.get(ProjectFilter.parameter_name)
+        if node_id:
+            node = get_object_or_404(models.Node, pk=node_id)
+        else:
+            node = models.Node.objects.order_by('name').first()
+        if node:
+            scrapyd_api.sync_node_projects(node)
+            if not project_name:
+                project = models.Project.objects.filter(node=node).order_by("-version").first()
+                if project:
+                    project_name = project.name
+            q = request.GET.copy()
+            q[ProjectNodeFilter.parameter_name] = str(node.id)
+            q[ProjectFilter.parameter_name] = project_name
+            request.GET = q
         return super().changelist_view(request, extra_context)
-
 
 
 class SpiderNodeFilter(ProjectNodeFilter):
@@ -117,22 +148,42 @@ class SpiderProjectVersionFilter(CustomFilter):
 
     def lookups(self, request, model_admin):
         node_id = request.GET.get(SpiderNodeFilter.parameter_name)
-        if not node_id:
-            return []
         project_name = request.GET.get(SpiderProjectFilter.parameter_name)
-        if not project_name:
+        if not (project_name and node_id):
             return []
         # 获取当前节点下的所有项目版本
-        versions = models.Project.objects.filter(node_id=node_id, name=project_name).values_list('version', flat=True).order_by("-version").distinct()
+        versions = models.Project.objects.filter(node_id=node_id, name=project_name).values_list('version', flat=True).order_by("-version")
         return [(v, f'{v}({datetime.fromtimestamp(int(v))})') for v in versions]
 
 
 @admin.register(models.Spider)
 class SpiderAdmin(admin.ModelAdmin):
-    list_display = ("name", "project_name", "project_node_name", "create_time")
+    list_display = ("name", "project_name", "project_node_name", "start_spider", "create_time")
     readonly_fields = ("create_time", "update_time")
     list_filter = (SpiderNodeFilter, SpiderProjectFilter, SpiderProjectVersionFilter)
     actions = ["start_spiders"]
+
+    def get_urls(self):
+
+        urls = super().get_urls()
+        custom_urls = [
+            path(
+                "<path:spider_id>/start/",
+                self.admin_site.admin_view(self.start_spider_view),
+                name="scrapy_spider_start",
+            ),
+        ]
+        return custom_urls + urls
+
+    def start_spider_view(self, request, spider_id):
+        spider = get_object_or_404(models.Spider, pk=spider_id)
+        try:
+            job_id = scrapyd_api.start_spider(spider)
+            self.message_user(request, f"成功启动爬虫 {spider.name} (job_id={job_id})", level=messages.SUCCESS)
+        except Exception as e:
+            self.message_user(request, f"启动失败: {e}", level=messages.ERROR)
+        from django.shortcuts import redirect
+        return redirect(request.META.get("HTTP_REFERER", "/admin/django_scrapyd_manager/spider/"))
 
     def project_name(self, obj):
         return obj.project.name
@@ -151,7 +202,10 @@ class SpiderAdmin(admin.ModelAdmin):
         if node_id and project_name and version:
             project = models.Project.objects.filter(node_id=node_id, name=project_name, version=version).first()
             if project:
-                scrapyd_api.list_project_spiders(project)
+                scrapyd_api.sync_project_spiders(project)
+                return models.Spider.objects.filter(
+                    project=project,
+                )
         return super().get_queryset(request)
 
     def get_object(self, request, object_id, from_field = ...):
@@ -183,6 +237,13 @@ class SpiderAdmin(admin.ModelAdmin):
                 request.GET = q
         return super().changelist_view(request, extra_context)
 
+    def start_spider(self, obj: models.Spider):
+        return format_html(
+            '<a class="button" href="{}">启动</a>',
+            f"/admin/django_scrapyd_manager/spider/{obj.id}/start/"
+        )
+    start_spider.short_description = "运行"
+
     def start_spiders(self, request, queryset):
         """启动选中的爬虫"""
         if not queryset:
@@ -200,24 +261,57 @@ class SpiderAdmin(admin.ModelAdmin):
 
 @admin.register(models.SpiderGroup)
 class SpiderGroupAdmin(admin.ModelAdmin):
-    list_display = ("name", "description", "create_time")
+    list_display = ("name", "related_nodes", "related_spiders", "formatted_kwargs", "description", "start_spider_group", "create_time")
     readonly_fields = ("create_time", "update_time")
-    # filter_horizontal = ("spiders",)
+    filter_horizontal = ("nodes",)
     form = forms.SpiderGroupForm
     actions = ["start_group_spiders"]
-    fieldsets = (
-        ("基础信息", {
-            "fields": (("name", "version_select", ), )
-        }),
-        ("爬虫配置", {
-            "fields": ("spiders_select", "description", "kwargs"),
-            "description": "选择关联的爬虫，并可设置额外参数"
-        }),
-        ("时间信息", {
-            "fields": ("create_time", "update_time"),
-            "classes": ("collapse",),
-        }),
+    fields = (
+        ("name", "version_select"),
+        "nodes",
+        "spiders_select",
+        "description",
+        "kwargs",
+        "create_time",
+        "update_time",
     )
+
+    def formatted_kwargs(self, obj: models.SpiderGroup):
+        args = []
+        for key, value in obj.kwargs.items():
+            args.append(f"{key} = {value}")
+        if len(args) == 5:
+            args.append("···")
+        return format_html('<span style="line-height: 1">%s</span>' % '<br>'.join(args))
+    formatted_kwargs.short_description = "参数"
+
+    def related_nodes(self, obj: models.SpiderGroup):
+        nodes = []
+        for node in obj.nodes.all()[:5]:
+            href = f"/admin/django_scrapyd_manager/node/?id={obj.id}"
+            nodes.append(f"<a href='{href}'>{node.name}</a>")
+        if len(nodes) == 5:
+            nodes.append("···")
+        return format_html('<span style="line-height: 1">%s</span>' % '<br>'.join(nodes))
+    related_nodes.short_description = "节点"
+
+    def related_spiders(self, obj: models.SpiderGroup):
+        spiders = []
+        for spider in obj.spiders:
+            spider_name = spider["name"]
+            href = f"/admin/django_scrapyd_manager/spider/?name={spider_name}"
+            spiders.append(f"<a href='{href}'>{spider_name}</a>")
+        if len(spiders) == 5:
+            spiders.append("···")
+        return format_html('<span style="line-height: 1">%s</span>' % '<br>'.join(spiders))
+    related_spiders.short_description = "爬虫"
+
+    def start_spider_group(self, obj: models.SpiderGroup):
+        return format_html(
+            '<a class="button" href="{}">启动</a>',
+            f"/admin/django_scrapyd_manager/spidergroup/{obj.id}/start/"
+        )
+    start_spider_group.short_description = "运行"
 
     def start_group_spiders(self, request, queryset):
         """启动选中的爬虫组（组内所有爬虫）"""
@@ -225,7 +319,7 @@ class SpiderGroupAdmin(admin.ModelAdmin):
             messages.error(request, "请选择要启动的爬虫组")
             return
         for group in queryset:
-            spiders = group.spiders.all()
+            spiders = group.spiders
             if not spiders:
                 messages.warning(request, f"爬虫组 {group.name} 内没有爬虫")
                 continue
@@ -237,6 +331,32 @@ class SpiderGroupAdmin(admin.ModelAdmin):
                     messages.error(request, f"组 {group.name} -> 启动爬虫 {spider.name} 失败: {str(e)}")
 
     start_group_spiders.short_description = "启动选中的爬虫组"
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom_urls = [
+            path(
+                "<path:group_id>/start/",
+                self.admin_site.admin_view(self.start_group_view),
+                name="scrapy_spidergroup_start",
+            ),
+        ]
+        return custom_urls + urls
+
+    def start_group_view(self, request, group_id):
+        group = get_object_or_404(models.SpiderGroup, pk=group_id)
+        spiders = group.spiders or []
+        if not spiders:
+            self.message_user(request, f"组 {group.name} 内没有爬虫", level=messages.WARNING)
+        for spider in spiders:
+            try:
+                job_id = scrapyd_api.start_spider(spider)
+                self.message_user(request, f"组 {group.name} -> 启动爬虫 {spider['name']} (job_id={job_id})",
+                                  level=messages.SUCCESS)
+            except Exception as e:
+                self.message_user(request, f"组 {group.name} -> 启动爬虫 {spider['name']} 失败: {e}",
+                                  level=messages.ERROR)
+        return redirect(request.META.get("HTTP_REFERER", "/admin/django_scrapyd_manager/spidergroup/"))
 
 
 class JobNodeFilter(ProjectNodeFilter):
@@ -265,7 +385,7 @@ class JobSpiderFilter(CustomFilter):
 @admin.register(models.Job)
 class JobAdmin(admin.ModelAdmin):
     list_display = (
-        "job_id", "job_project_version", "job_spider", "start_time", "end_time", "status", "pid"
+        "job_id", "job_project_version", "job_spider", "start_time", "end_time", "status", "pid", "stop_job",
     )
     readonly_fields = ("create_time", "update_time", "start_time", "end_time", "pid", "log_url", "items_url", "spider", "status")
     list_filter = ("status", JobNodeFilter, JobProjectFilter)
@@ -305,6 +425,35 @@ class JobAdmin(admin.ModelAdmin):
                 messages.error(request, f"重新启动任务 {job.spider.name} 失败: {str(e)}")
     start_jobs.short_description = "重新启动选中的任务"
 
+    def get_urls(self):
+        urls = super().get_urls()
+        custom_urls = [
+            path(
+                "<path:job_id>/stop/",
+                self.admin_site.admin_view(self.stop_job_view),
+                name="scrapy_job_stop",
+            ),
+        ]
+        return custom_urls + urls
+
+    def stop_job_view(self, request, job_id):
+        job = get_object_or_404(models.Job, pk=job_id)
+        try:
+            scrapyd_api.stop_job(job)
+            self.message_user(request, f"成功停止任务 {job.job_id} ({job.spider.name})", level=messages.SUCCESS)
+        except Exception as e:
+            self.message_user(request, f"停止任务失败: {e}", level=messages.ERROR)
+        return redirect(request.META.get("HTTP_REFERER", "/admin/django_scrapyd_manager/job/"))
+
+    def stop_job(self, obj: models.Job):
+        if obj.status == "running":  # 可选: 只在运行中显示按钮
+            return format_html(
+                '<a class="button" href="{}">停止</a>',
+                f"/admin/django_scrapyd_manager/job/{obj.id}/stop/"
+            )
+        return "-"
+    stop_job.short_description = "操作"
+
     def stop_jobs(self, request, queryset):
         """停止选中的爬虫任务"""
         if not queryset:
@@ -325,7 +474,7 @@ class JobAdmin(admin.ModelAdmin):
             node = get_object_or_404(models.Node, pk=node_id)
         else:
             return models.Job.objects.none()
-        scrapyd_api.list_jobs(node)
+        scrapyd_api.sync_jobs(node)
         return super().get_queryset(request).prefetch_related("spider", "spider__project", "spider__project__node")
 
     def get_object(self, request, object_id, from_field = ...):

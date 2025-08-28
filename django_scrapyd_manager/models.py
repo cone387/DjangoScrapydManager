@@ -1,6 +1,7 @@
 # scrapyd_manager/models.py
 from django.db import models
 from django.utils.timezone import datetime
+from .utils import get_md5
 
 
 class Node(models.Model):
@@ -31,9 +32,11 @@ class Node(models.Model):
 
 
 class Project(models.Model):
-    node = models.ForeignKey(Node, on_delete=models.DO_NOTHING, verbose_name="节点", db_constraint=False)
-    name = models.CharField(max_length=255, default=None)
-    version = models.CharField(max_length=255, default=None)
+    node = models.ForeignKey(Node, on_delete=models.DO_NOTHING, verbose_name="节点", db_constraint=False, related_name="projects")
+    name = models.CharField(max_length=255, verbose_name="项目名")
+    version = models.CharField(max_length=255, verbose_name='版本')
+    is_spider_synced = models.BooleanField(default=False, verbose_name="是否已同步当前版本爬虫")
+    is_deleted = models.BooleanField(default=False, verbose_name="是否已被删除")
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
@@ -43,11 +46,11 @@ class Project(models.Model):
         unique_together = (("node", "name", "version"),)
 
     def __str__(self):
-        return self.name
+        return f"{self.name}@{self.node.name}"
 
 
 class Spider(models.Model):
-    project = models.ForeignKey(Project, on_delete=models.DO_NOTHING, verbose_name="项目", db_constraint=False)
+    project = models.ForeignKey(Project, on_delete=models.DO_NOTHING, verbose_name="项目", db_constraint=False, related_name="spiders")
     name = models.CharField(max_length=255, verbose_name="爬虫名称")
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
@@ -62,6 +65,7 @@ class Spider(models.Model):
 
 
 class SpiderGroup(models.Model):
+    nodes = models.ManyToManyField(Node, db_constraint=False, verbose_name='节点')
     name = models.CharField(max_length=255, verbose_name="任务组名称", unique=True)
     version = models.CharField(max_length=100, verbose_name='版本')
     spiders = models.JSONField(default=list, verbose_name="爬虫")
@@ -79,8 +83,9 @@ class SpiderGroup(models.Model):
 
 
 class Job(models.Model):
-    spider = models.ForeignKey(Spider, on_delete=models.DO_NOTHING, verbose_name="爬虫", db_constraint=False)
+    spider = models.ForeignKey(Spider, on_delete=models.DO_NOTHING, verbose_name="爬虫", db_constraint=False, related_name="jobs")
     job_id = models.CharField(max_length=255, verbose_name="任务ID")
+    job_md5 = models.CharField(max_length=32, verbose_name="md5(job)", unique=True)
     start_time = models.DateTimeField(verbose_name="开始时间")
     end_time = models.DateTimeField(null=True, blank=True, verbose_name="结束时间")
     log_url = models.CharField(max_length=255, null=True, blank=True)
@@ -89,6 +94,19 @@ class Job(models.Model):
     pid = models.IntegerField(null=True, blank=True, verbose_name="进程ID")
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+
+    def gen_md5(self):
+        if not self.job_md5:
+            start_time = self.start_time
+            if isinstance(start_time, datetime):
+                start_time = start_time.strftime("%Y-%m-%d %H:%M:%S.%f")
+            fields = [self.spider.project.name, self.spider.name, self.job_id, start_time]
+            self.job_md5 = get_md5('-'.join(fields))
+        return self.job_md5
+
+    def save(self, *args, **kwargs):
+        self.gen_md5()
+        super().save(*args, **kwargs)
 
     class Meta:
         db_table = "scrapy_job"

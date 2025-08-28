@@ -16,7 +16,7 @@ class SpiderGroupForm(forms.ModelForm):
         required=True,
         label="版本"
     )
-    kwargs = forms.CharField(required=False)
+    kwargs = forms.JSONField(required=False, initial={})
 
     class Meta:
         model = models.SpiderGroup
