@@ -34,8 +34,6 @@ class Node(models.Model):
 class Project(models.Model):
     node = models.ForeignKey(Node, on_delete=models.DO_NOTHING, verbose_name="节点", db_constraint=False, related_name="projects")
     name = models.CharField(max_length=255, verbose_name="项目名")
-    version = models.CharField(max_length=255, verbose_name='版本')
-    is_spider_synced = models.BooleanField(default=False, verbose_name="是否已同步当前版本爬虫")
     is_deleted = models.BooleanField(default=False, verbose_name="是否已被删除")
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
@@ -43,14 +41,48 @@ class Project(models.Model):
     class Meta:
         db_table = "scrapy_project"
         verbose_name = verbose_name_plural = "Scrapy Project"
-        unique_together = (("node", "name", "version"),)
+        unique_together = (("node", "name"),)
 
     def __str__(self):
-        return f"{self.name}@{self.node.name}"
+        return self.name
+
+
+class ProjectVersion(models.Model):
+    project = models.ForeignKey(Project, on_delete=models.DO_NOTHING, verbose_name="项目", db_constraint=False, related_name="versions")
+    version = models.CharField(max_length=255, verbose_name='版本')
+    is_spider_synced = models.BooleanField(default=False, verbose_name="是否已同步当前版本爬虫")
+    is_deleted = models.BooleanField(default=False, verbose_name="是否已被删除")
+    create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
+    update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+
+    @property
+    def pretty(self):
+        if self.version.isdigit():
+            v = datetime.fromtimestamp(int(self.version))
+        else:
+            v = self.version
+        return v
+
+    @property
+    def full_path(self):
+        return f"{self.project.node.name}/{self.project.name}/{self.version}({self.pretty})"
+
+    @property
+    def short_path(self):
+        return f"{self.version}({self.pretty})"
+
+    class Meta:
+        db_table = "scrapy_project_version"
+        verbose_name = verbose_name_plural = "Scrapy Project Version"
+        unique_together = (("project", "version"),)
+        ordering = ["-version"]
+
+    def __str__(self):
+        return self.version
 
 
 class Spider(models.Model):
-    project = models.ForeignKey(Project, on_delete=models.DO_NOTHING, verbose_name="项目", db_constraint=False, related_name="spiders")
+    version = models.ForeignKey(ProjectVersion, on_delete=models.DO_NOTHING, verbose_name="版本", db_constraint=False, related_name="spiders")
     name = models.CharField(max_length=255, verbose_name="爬虫名称")
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
@@ -61,18 +93,32 @@ class Spider(models.Model):
     class Meta:
         db_table = "scrapy_spider"
         verbose_name = verbose_name_plural = "Scrapy Spider"
-        unique_together = (("project", "name"),)
+        unique_together = (("version", "name"),)
+        ordering = ["-version", "name"]
 
 
 class SpiderGroup(models.Model):
-    nodes = models.ManyToManyField(Node, db_constraint=False, verbose_name='节点')
     name = models.CharField(max_length=255, verbose_name="任务组名称", unique=True)
-    version = models.CharField(max_length=100, verbose_name='版本')
+    node = models.ForeignKey(Node, db_constraint=False, on_delete=models.DO_NOTHING, verbose_name="节点")
+    project = models.ForeignKey(Project, db_constraint=False, verbose_name='项目', on_delete=models.CASCADE)
+    version = models.ForeignKey(ProjectVersion, verbose_name='版本', null=True, blank=True, on_delete=models.CASCADE)
     spiders = models.JSONField(default=list, verbose_name="爬虫")
-    kwargs = models.JSONField(default=dict, verbose_name="参数")
+    kwargs = models.JSONField(default=dict, verbose_name="参数", null=True, blank=True)
     description = models.CharField(max_length=200, blank=True, null=True, verbose_name="任务组描述")
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+
+    @property
+    def resolved_version(self):
+        return self.version if self.version else ProjectVersion.objects.filter(project=self.project).first()
+
+    @property
+    def resolved_spiders(self):
+        names = []
+        for spider in self.spiders:
+            names.append(spider["name"])
+        spiders = Spider.objects.filter(name__in=names, version=self.resolved_version, version__project=self.project)
+        return spiders
 
     class Meta:
         db_table = "scrapy_spider_group"
@@ -100,7 +146,7 @@ class Job(models.Model):
             start_time = self.start_time
             if isinstance(start_time, datetime):
                 start_time = start_time.strftime("%Y-%m-%d %H:%M:%S.%f")
-            fields = [self.spider.project.name, self.spider.name, self.job_id, start_time]
+            fields = [self.spider.version.project.name, self.spider.name, self.job_id, start_time]
             self.job_md5 = get_md5('-'.join(fields))
         return self.job_md5
 

@@ -20,12 +20,12 @@ def _auth_for_node(node: models.Node):
 
 def start_spider(spider: models.Spider) -> models.Job | None:
     """启动爬虫并返回 Job"""
-    url = f"{spider.project.node.url}/schedule.json"
+    url = f"{spider.version.project.node.url}/schedule.json"
     data = {
-        "project": spider.project.name,
+        "project": spider.version.project.name,
         "spider": spider.name,
     }
-    resp = requests.post(url, data=data, auth=_auth_for_node(spider.project.node), timeout=15)
+    resp = requests.post(url, data=data, auth=_auth_for_node(spider.version.project.node), timeout=15)
     resp.raise_for_status()
     result = resp.json()
     job_id = result.get("jobid")
@@ -37,7 +37,7 @@ def start_spider(spider: models.Spider) -> models.Job | None:
         spider=spider,
         job_id=job_id,
         start_time=models.datetime.now(),
-        log_url=f"/logs/{spider.project.name}/{spider.name}/{job_id}.log",
+        log_url=f"/logs/{spider.version.project.name}/{spider.name}/{job_id}.log",
         status="pending",
     )
     return job
@@ -55,7 +55,7 @@ def start_spiders(spiders: List[models.Spider]) -> List[models.Job]:
 
 def stop_spider(spider: models.Spider) -> List[models.Job] | None:
     """停止某个爬虫的所有任务"""
-    jobs = sync_jobs(spider.project.node)
+    jobs = sync_jobs(spider.version.project.node)
     target_jobs = [j for j in jobs if j.spider == spider]
     stopped = []
     for job in target_jobs:
@@ -77,12 +77,12 @@ def stop_spiders(spiders: List[models.Spider]) -> List[models.Job] | None:
 
 def stop_job(job: models.Job) -> models.Job | None:
     """停止单个任务"""
-    url = f"{job.spider.project.node.url}/cancel.json"
+    url = f"{job.spider.version.project.node.url}/cancel.json"
     data = {
-        "project": job.spider.project.name,
+        "project": job.spider.version.project.name,
         "job": job.job_id,
     }
-    resp = requests.post(url, data=data, auth=_auth_for_node(job.spider.project.node), timeout=15)
+    resp = requests.post(url, data=data, auth=_auth_for_node(job.spider.version.project.node), timeout=15)
     resp.raise_for_status()
     result = resp.json()
     if result.get("status") == "ok":
@@ -126,8 +126,8 @@ def stop_spider_group(group: models.SpiderGroup) -> List[models.Job]:
 @ttl_cache()
 def get_job_info(job: models.Job) -> dict:
     """获取某个任务的详细信息"""
-    url = f"{job.spider.project.node.url}/logs/{job.spider.project.name}/{job.spider.name}/{job.job_id}.json"
-    resp = requests.get(url, auth=_auth_for_node(job.spider.project.node), timeout=15)
+    url = f"{job.spider.version.project.node.url}/logs/{job.spider.version.project.name}/{job.spider.name}/{job.job_id}.json"
+    resp = requests.get(url, auth=_auth_for_node(job.spider.version.project.node), timeout=15)
     resp.raise_for_status()
     return resp.json()
 
@@ -137,27 +137,28 @@ def sync_jobs(node: models.Node) -> List[models.Job]:
     """列出节点上的所有任务并同步到数据库"""
     sync_node_projects(node)
     for project in models.Project.objects.filter(node=node):
-        sync_project_spiders(project)
+        for version in project.versions.all():
+            sync_project_version_spiders(version)
     url = f"{node.url}/listjobs.json"
     project_names = models.Project.objects.filter(node=node).values_list("name", flat=True).distinct()
 
     def match_job_spider(job_start_time: str, job_project_name, job_spider_name) -> models.Spider | None:
-        valid_projects = []
-        for p in models.Project.objects.filter(node=node, name=job_project_name):
-            if not p.version.isdigit():
-                logger.warning("project version is not digit: %s@%s", p.name, p.version)
+        valid_versions = []
+        for project_version in models.ProjectVersion.objects.filter(project__node=node, project__name=job_project_name):
+            if not project_version.version.isdigit():
+                logger.warning("project version is not digit: %s@%s", project_version.version, job_project_name)
                 continue
-            version_datetime = datetime.fromtimestamp(int(p.version))
+            version_datetime = datetime.fromtimestamp(int(project_version.version))
             job_datetime = datetime.strptime(job_start_time, "%Y-%m-%d %H:%M:%S.%f")
             if job_datetime > version_datetime:
-                valid_projects.append(p)
-        if not valid_projects:
+                valid_versions.append(project_version)
+        if not valid_versions:
             raise ValueError(f"no valid version found for job {job_project_name}@{job_spider_name} started at {job_start_time}")
-        valid_projects.sort(key=lambda x: int(x.version), reverse=True)
+        valid_versions.sort(key=lambda x: int(x.version), reverse=True)
         # 匹配spider
-        for p in valid_projects:
+        for v in valid_versions:
             try:
-                spider = models.Spider.objects.get(project=p, name=job_spider_name)
+                spider = models.Spider.objects.get(version=v, name=job_spider_name)
                 break
             except models.Spider.DoesNotExist:
                 continue
@@ -191,20 +192,24 @@ def sync_jobs(node: models.Node) -> List[models.Job]:
                 job.gen_md5()
                 jobs.append(job)
 
-    deleted,  _ = models.Job.objects.filter(spider__project__node=node).delete()
+    deleted,  _ = models.Job.objects.filter(spider__version__project__node_id=node.id).delete()
     models.Job.objects.bulk_create(jobs)
     logger.info(f"deleted {deleted} old spiders, created {len(jobs)} new jobs for node {node}")
     return jobs
 
 
-@ttl_cache()
-def list_project_versions(project: models.Project) -> List[str]:
-    """列出某个项目的版本"""
+def sync_project_versions(project: models.Project):
     url = f"{project.node.url}/listversions.json"
     resp = requests.get(url, params={"project": project.name}, auth=_auth_for_node(project.node), timeout=15)
     resp.raise_for_status()
     data = resp.json()
-    return data.get("versions", [])
+    versions = data.get("versions", [])
+    project_versions = []
+    for version in versions:
+        project_versions.append(models.ProjectVersion(project=project, version=version))
+    models.ProjectVersion.objects.filter(~Q(version__in=versions), project=project).update(is_deleted=True)
+    models.ProjectVersion.objects.bulk_create(project_versions, ignore_conflicts=True)
+    logger.info(f"sync {len(project_versions)} versions for {project}")
 
 
 def sync_node_projects(node: models.Node, include_version=True):
@@ -215,50 +220,43 @@ def sync_node_projects(node: models.Node, include_version=True):
     data = resp.json()
     projects = data.get("projects", [])
 
-    if include_version:
-        for project_name in projects:
-            # 这里ID不能用固定值，因为list_project_versions用了缓存 如果用固定值会走缓存
-            versions = list_project_versions(models.Project(id=f"{node.id}:{project_name}", node=node, name=project_name))
-            project_version_result = []
-            for version in versions:
-                project_version_result.append(models.Project(node=node, name=project_name, version=version))
-            # 如果数据库中有当前list_project_versions中不存在的version，则将其重置为已删除状态
-            models.Project.objects.filter(~Q(version__in=versions), node=node, name=project_name).update(is_deleted=True)
-            models.Project.objects.bulk_create(project_version_result, ignore_conflicts=True)
-            logger.info(f"sync {len(project_version_result)} projects for node {node}")
-    else:
-        raise NotImplementedError()
+    for project_name in projects:
+        project, created = models.Project.objects.get_or_create(node=node, name=project_name)
+        if include_version:
+            sync_project_versions(project)
+        # todo: 要删除已经移除的project
+    logger.info(f"sync {len(projects)} project for {node}")
 
 
-def sync_project_spiders(project: models.Project) -> bool:
+def sync_project_version_spiders(version: models.ProjectVersion) -> bool:
     """列出某个项目的爬虫"""
-    if not project.is_spider_synced:
-        url = f"{project.node.url}/listspiders.json"
+    if not version.is_spider_synced:
+        url = f"{version.project.node.url}/listspiders.json"
         resp = requests.get(url, params={
-            "project": project.name,
-            "_version": project.version,
-        }, auth=_auth_for_node(project.node), timeout=15)
+            "project": version.project.name,
+            "_version": version.version,
+        }, auth=_auth_for_node(version.project.node), timeout=15)
         resp.raise_for_status()
         data = resp.json()
         spiders = data.get("spiders", [])
-        results = [models.Spider(project=project, name=spider) for spider in spiders]
+        results = [models.Spider(version=version, name=spider) for spider in spiders]
         models.Spider.objects.bulk_create(results)
         # 只需同步一次, 因为一个版本的spiders是不会变的
-        logger.info(f"synced {len(spiders)} spiders for project {project}")
-        project.is_spider_synced = True
-        project.save()
-    return project.is_spider_synced
+        logger.info(f"synced {len(spiders)} spiders for {version}@{version.project}")
+        version.is_spider_synced = True
+        version.save()
+    return version.is_spider_synced
 
 
-def add_version(project: models.Project, egg_path: str):
+def add_version(version: models.ProjectVersion, egg_path: str):
     """部署新版本"""
-    url = f"{project.node.url}/addversion.json"
+    url = f"{version.project.node.url}/addversion.json"
     if not os.path.exists(egg_path):
         return {"status": "error", "reason": "egg file not found"}
     files = {"egg": open(egg_path, "rb")}
-    data = {"project": project.name, "version": project.version}
+    data = {"project": version.project.name, "version": version.version}
     try:
-        resp = requests.post(url, data=data, files=files, auth=_auth_for_node(project.node), timeout=60)
+        resp = requests.post(url, data=data, files=files, auth=_auth_for_node(version.project.node), timeout=60)
         resp.raise_for_status()
         return resp.json()
     finally:
@@ -268,11 +266,11 @@ def add_version(project: models.Project, egg_path: str):
             pass
 
 
-def delete_version(project: models.Project):
+def delete_version(version: models.ProjectVersion):
     """删除某个版本"""
-    url = f"{project.node.url}/delversion.json"
-    data = {"project": project.name, "version": project.version}
-    resp = requests.post(url, data=data, auth=_auth_for_node(project.node), timeout=15)
+    url = f"{version.project.node.url}/delversion.json"
+    data = {"project": version.project.name, "version": version.version}
+    resp = requests.post(url, data=data, auth=_auth_for_node(version.project.node), timeout=15)
     resp.raise_for_status()
     return resp.json()
 
