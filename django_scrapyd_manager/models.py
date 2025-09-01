@@ -1,4 +1,5 @@
 # scrapyd_manager/models.py
+from __future__ import annotations
 from django.db import models
 from django.utils.timezone import datetime
 from .utils import get_md5
@@ -15,6 +16,28 @@ class Node(models.Model):
     password = models.CharField(max_length=255, blank=True, null=True)
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+
+    @classmethod
+    def default_node(cls):
+        for node in cls.objects.all().prefetch_related("projects"):
+            if node.projects.count():
+                return node
+        return None
+
+    @property
+    def default_project(self):
+        for project in self.projects.all():
+            if project.versions.count() > 0:
+                return project
+        return None
+
+    @classmethod
+    def default_project_of_node(cls, node: str | int | Node):
+        if isinstance(node, str):
+            assert node.isdigit(), "node id非法 必须是整型"
+        if not isinstance(node, Node):
+            node = Node.objects.get(id=int(node))
+        return node.default_project
 
     class Meta:
         ordering = ["-create_time"]
@@ -37,6 +60,10 @@ class Project(models.Model):
     is_deleted = models.BooleanField(default=False, verbose_name="是否已被删除")
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+
+    @property
+    def latest_version(self):
+        return self.versions.order_by("-version").first()
 
     class Meta:
         db_table = "scrapy_project"
@@ -110,7 +137,7 @@ class SpiderGroup(models.Model):
 
     @property
     def resolved_version(self):
-        return self.version if self.version else ProjectVersion.objects.filter(project=self.project).first()
+        return self.version if self.version else self.project.latest_version
 
     @property
     def resolved_spiders(self):
@@ -128,6 +155,12 @@ class SpiderGroup(models.Model):
         return self.name
 
 
+class StatusChoice(models.TextChoices):
+    running = "running", "运行中"
+    finished = "finished", "已结束"
+    pending = "pending", "启动中"
+
+
 class Job(models.Model):
     spider = models.ForeignKey(Spider, on_delete=models.DO_NOTHING, verbose_name="爬虫", db_constraint=False, related_name="jobs")
     job_id = models.CharField(max_length=255, verbose_name="任务ID")
@@ -136,7 +169,7 @@ class Job(models.Model):
     end_time = models.DateTimeField(null=True, blank=True, verbose_name="结束时间")
     log_url = models.CharField(max_length=255, null=True, blank=True)
     items_url = models.CharField(max_length=255, null=True, blank=True)
-    status = models.CharField(max_length=20, verbose_name="状态")
+    status = models.CharField(max_length=20, verbose_name="状态", choices=StatusChoice.choices)
     pid = models.IntegerField(null=True, blank=True, verbose_name="进程ID")
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")

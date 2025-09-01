@@ -31,13 +31,13 @@
                     if(data.length){
                         const latest_version = data[0];
                         version_text = `自动最新版[${latest_version.text}]`
-                        $version.append(new Option(version_text, "0"))
-                        $version.val("0");
+                        $version.append(new Option(version_text, '', true))
+                        // $version.val("0");
                         data.forEach(v => {
                             $version.append(new Option(v.text, v.id));
                         });
                     }else{
-                        $version.append(new Option(`${version_text}[暂无可用版本]`, "0"))
+                        $version.append(new Option(`${version_text}[暂无可用版本]`, '0'))
                     }
                     $version.trigger("change");
                 }
@@ -46,8 +46,9 @@
 
         function loadSpiders(versionId) {
             $.ajax({
-                url: `/admin/django_scrapyd_manager/spidergroup/api/version/${versionId}/spiders/`,
+                url: `/admin/django_scrapyd_manager/spidergroup/api/version/spiders/`,
                 data: {
+                    version_id: versionId,
                     project_id: $project.val(),
                     node_id: $node.val()
                 },
@@ -56,6 +57,10 @@
                     data.forEach(s => {
                         $spiders.append(new Option(s.text, s.id));
                     });
+                    // 重新让 admin 的过滤多选控件同步
+                    // if (window.SelectFilter) {
+                    //     SelectFilter.init("id_spiders_select", "爬虫", 0);
+                    // }
                 }
             });
         }
@@ -83,11 +88,15 @@
 
         $version.on("change", function() {
             let versionId = $(this).val();
-            if (versionId) {
-                loadSpiders(versionId);
-            } else {
-                $spiders.empty();
-            }
+            loadSpiders(versionId);
+            // if (versionId) {
+            //     if(versionId === '0'){
+            //         versionId = undefined
+            //     }
+            //     loadSpiders(versionId);
+            // } else {
+            //     $spiders.empty();
+            // }
         });
     });
 })(django.jQuery);

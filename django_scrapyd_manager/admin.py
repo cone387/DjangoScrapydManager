@@ -16,6 +16,7 @@ from . import forms
 
 
 class CustomFilter(admin.SimpleListFilter):
+
     def choices(self, changelist):
         add_facets = changelist.add_facets
         facet_counts = self.get_facet_queryset(changelist) if add_facets else None
@@ -86,6 +87,12 @@ class ProjectAdmin(admin.ModelAdmin):
     readonly_fields = ("create_time", "update_time")
     list_filter = (ProjectNodeFilter, )
 
+    def has_change_permission(self, request, obj = ...):
+        return False
+
+    def has_delete_permission(self, request, obj = ...):
+        return False
+
     def latest_version(self, obj: models.Project):
         version = obj.versions.order_by("-version").first()
         if version:
@@ -130,9 +137,15 @@ class VersionProjectFilter(ProjectFilter):
 
 @admin.register(models.ProjectVersion)
 class ProjectVersionAdmin(admin.ModelAdmin):
-    list_display = ("project", "linked_version", "spider_count", "is_spider_synced", "is_deleted", "create_time")
+    list_display = ("id", "linked_version", "project", "spider_count", "is_spider_synced", "is_deleted", "create_time")
     readonly_fields = ("create_time", "update_time")
     list_filter = (VersionNodeFilter, VersionProjectFilter)
+
+    def has_change_permission(self, request, obj = ...):
+        return False
+
+    def has_delete_permission(self, request, obj = ...):
+        return False
 
     def linked_version(self, obj: models.ProjectVersion):
         if obj.version.isdigit():
@@ -148,14 +161,6 @@ class ProjectVersionAdmin(admin.ModelAdmin):
         return obj.spiders.count()
     spider_count.short_description = "爬虫数量"
 
-    # def get_queryset(self, request):
-    #     node_id = request.GET.get(ProjectNodeFilter.parameter_name)
-    #     project_name = request.GET.get(ProjectFilter.parameter_name)
-    #     if node_id and project_name:
-    #         return models.Project.objects.filter(node_id=node_id, name=project_name).order_by("name")
-    #     return models.Project.objects.none()
-    #
-    #
     def changelist_view(self, request, extra_context=None):
         node_id = request.GET.get(VersionProjectFilter.node_filter.parameter_name)
         project_name = request.GET.get(VersionProjectFilter.parameter_name)
@@ -211,6 +216,12 @@ class SpiderAdmin(admin.ModelAdmin):
     list_filter = (SpiderNodeFilter, SpiderProjectFilter, SpiderProjectVersionFilter)
     actions = ["start_spiders"]
 
+    def has_change_permission(self, request, obj = ...):
+        return False
+
+    def has_delete_permission(self, request, obj = ...):
+        return False
+
     def get_urls(self):
 
         urls = super().get_urls()
@@ -261,24 +272,39 @@ class SpiderAdmin(admin.ModelAdmin):
         return get_object_or_404(models.Spider, pk=object_id)
 
     def changelist_view(self, request, extra_context=None):
+        if request.GET.get("id"):
+            return super().changelist_view(request, extra_context)
         node_id = request.GET.get(SpiderNodeFilter.parameter_name)
         project_name = request.GET.get(SpiderProjectFilter.parameter_name)
         version = request.GET.get(SpiderProjectVersionFilter.parameter_name)
+        last_node_id = request.COOKIES.get("last_node_id")
+        last_project_name = request.COOKIES.get("last_project_name")
+        new_query = request.GET.copy()
+        if last_node_id and last_node_id != node_id:
+            new_query.pop(SpiderProjectFilter.parameter_name, None)
+            new_query.pop(SpiderProjectVersionFilter.parameter_name, None)
+            version = project_name = None
+        elif last_project_name and last_project_name != project_name:
+            new_query.pop(SpiderProjectVersionFilter.parameter_name, None)
+            version = None
         if not node_id:
-            q = request.GET.copy()
             node_id = models.Node.objects.order_by('name').values_list("id", flat=True).first()
-            if node_id:
-                q[SpiderNodeFilter.parameter_name] = str(node_id)
-                if not project_name:
-                    project_name = models.Project.objects.filter(node_id=node_id).values_list("name", flat=True).first()
-                    if project_name:
-                        q[SpiderProjectFilter.parameter_name] = project_name
-                        if not version:
-                            version = models.ProjectVersion.objects.filter(project__node_id=node_id, project__name=project_name).first()
-                            if version:
-                                q[SpiderProjectVersionFilter.parameter_name] = version.version
-            request.GET = q
-        return super().changelist_view(request, extra_context)
+        if node_id:
+            new_query[SpiderNodeFilter.parameter_name] = str(node_id)
+            if not project_name:
+                project = models.Node.default_project_of_node(node_id)
+                if project:
+                    project_name = project.name if project else None
+                    new_query[SpiderProjectFilter.parameter_name] = project_name
+                    if not version:
+                        version = project.latest_version
+                        if version:
+                            new_query[SpiderProjectVersionFilter.parameter_name] = version.version
+        request.GET = new_query
+        response = super().changelist_view(request, extra_context)
+        response.set_cookie("last_node_id", node_id)
+        response.set_cookie("last_project_name", project_name)
+        return response
 
     def start_spider(self, obj: models.Spider):
         return format_html(
@@ -331,10 +357,9 @@ class SpiderGroupAdmin(admin.ModelAdmin):
 
     def related_spiders(self, obj: models.SpiderGroup):
         spiders = []
-        for spider in obj.spiders:
-            spider_name = spider["name"]
-            href = f"/admin/django_scrapyd_manager/spider/?name={spider_name}"
-            spiders.append(f"<a href='{href}'>{spider_name}</a>")
+        for spider in obj.resolved_spiders:
+            href = f"/admin/django_scrapyd_manager/spider/?id={spider.id}"
+            spiders.append(f"<a href='{href}'>{spider.name}</a>")
         if len(spiders) == 5:
             spiders.append("···")
         return format_html('<span style="line-height: 1">%s</span>' % '<br>'.join(spiders))
@@ -363,6 +388,7 @@ class SpiderGroupAdmin(admin.ModelAdmin):
                     messages.success(request, f"组 {group.name} -> 启动爬虫 {spider.name} (job_id={job_id})")
                 except Exception as e:
                     messages.error(request, f"组 {group.name} -> 启动爬虫 {spider.name} 失败: {str(e)}")
+                    break
 
     start_group_spiders.short_description = "启动选中的爬虫组"
 
@@ -385,7 +411,7 @@ class SpiderGroupAdmin(admin.ModelAdmin):
                 name="project_versions",
             ),
             path(
-                "api/version/<int:version_id>/spiders/",
+                "api/version/spiders/",
                 self.admin_site.admin_view(self.get_spiders),
                 name="version_spiders",
             ),
@@ -409,7 +435,8 @@ class SpiderGroupAdmin(admin.ModelAdmin):
         return JsonResponse(data, safe=False)
 
     @staticmethod
-    def get_spiders(request, version_id):
+    def get_spiders(request):
+        version_id = request.GET.get("version_id")
         if version_id:
             spiders = models.Spider.objects.filter(version_id=version_id)
         else:
@@ -461,13 +488,25 @@ class JobSpiderFilter(CustomFilter):
         return []
 
 
+class JobStatusFilter(CustomFilter):
+    parameter_name = "status"
+    title = "状态"
+
+    def lookups(self, request, model_admin):
+        filters = [
+            (x, models.StatusChoice[x].label) for x in models.Job.objects.values_list("status", flat=True).distinct()
+        ]
+        filters.sort()
+        return filters
+
+
 @admin.register(models.Job)
 class JobAdmin(admin.ModelAdmin):
     list_display = (
         "job_id", "job_project_version", "job_spider", "start_time", "end_time", "status", "pid", "stop_job",
     )
     readonly_fields = ("create_time", "update_time", "start_time", "end_time", "pid", "log_url", "items_url", "spider", "status")
-    list_filter = ("status", JobNodeFilter, JobProjectFilter)
+    list_filter = (JobStatusFilter, JobNodeFilter, JobProjectFilter)
     actions = ["start_jobs", "stop_jobs"]
     ordering = ("-status", "-start_time")
 
