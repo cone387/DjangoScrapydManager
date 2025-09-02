@@ -6,13 +6,15 @@ from datetime import datetime
 from django.utils.html import format_html
 from django.urls import path
 from django.shortcuts import redirect
+from django.conf import settings
 from . import models
 from . import scrapyd_api
 from . import forms
-# #
-# models.Spider.objects.all().delete()
-# models.Job.objects.all().delete()
-# models.Project.objects.all().delete()
+
+
+admin_project_name = "django_scrapyd_manager"
+admin_prefix = settings.FORCE_SCRIPT_NAME if settings.FORCE_SCRIPT_NAME else ''
+admin_prefix = f"{admin_prefix}/admin"
 
 
 class CustomFilter(admin.SimpleListFilter):
@@ -43,13 +45,22 @@ class CustomFilter(admin.SimpleListFilter):
 
 @admin.register(models.Node)
 class NodeAdmin(admin.ModelAdmin):
-    list_display = ("name", "ip", "port", "description", "related_projects", "auth", "create_time")
+    list_display = ("name", "linked_url", "description", "related_projects", "auth", "daemon_status", "create_time")
     readonly_fields = ("create_time", "update_time")
+
+    def linked_url(self, obj: models.Node) -> str:
+        return format_html(f"<a href='{obj.url}'>{obj.url}</a>")
+    linked_url.short_description = "Scrapyd地址"
+
+    def daemon_status(self, obj: models.Node):
+        return scrapyd_api.daemon_status(obj).get("status") == "ok"
+    daemon_status.short_description = "状态"
+    daemon_status.boolean = True
 
     def related_projects(self, obj: models.Node):
         projects = []
         for project in obj.projects.all()[:5]:
-            href = f"/admin/django_scrapyd_manager/project/?node_id={obj.id}"
+            href = f"{admin_prefix}/{admin_project_name}/{models.Project._meta.model_name}/?node_id={obj.id}"
             projects.append(f"<a href='{href}'>{project.name}</a>")
         if len(projects) == 5:
             projects.append("···")
@@ -96,13 +107,13 @@ class ProjectAdmin(admin.ModelAdmin):
     def latest_version(self, obj: models.Project):
         version = obj.versions.order_by("-version").first()
         if version:
-            href = f"/admin/django_scrapyd_manager/projectversion/?id={version.id}"
+            href = f"{admin_prefix}/{admin_project_name}/{models.ProjectVersion._meta.model_name}/?id={version.id}"
             return format_html(f'<a href="{href}">{version.pretty}</a>')
         return '-'
     latest_version.short_description = "最新版本"
 
     def related_versions(self, obj: models.Project):
-        href = f"/admin/django_scrapyd_manager/projectversion/?project_id={obj.id}"
+        href = f"{admin_prefix}/{admin_project_name}/{models.ProjectVersion._meta.model_name}/?project_id={obj.id}"
         return format_html(f'<a href="{href}">{obj.versions.count()}</a>')
     related_versions.short_description = "版本数量"
 
@@ -152,7 +163,7 @@ class ProjectVersionAdmin(admin.ModelAdmin):
             version_datetime = datetime.fromtimestamp(int(obj.version))
         else:
             version_datetime = obj.version
-        href = f"/admin/django_scrapyd_manager/spider/?version__version={obj.version}"
+        href = f"{admin_prefix}/{admin_project_name}/{models.Spider._meta.model_name}/?version__version={obj.version}"
         return format_html(f'<a href="{href}">{obj.version}({version_datetime})</a>')
     linked_version.admin_order_field = "version"
     linked_version.short_description = "版本"
@@ -242,7 +253,7 @@ class SpiderAdmin(admin.ModelAdmin):
         except Exception as e:
             self.message_user(request, f"启动失败: {e}", level=messages.ERROR)
         from django.shortcuts import redirect
-        return redirect(request.META.get("HTTP_REFERER", "/admin/django_scrapyd_manager/spider/"))
+        return redirect(request.META.get("HTTP_REFERER", f"{admin_prefix}/{admin_project_name}/spider/"))
 
     def project_name(self, obj: models.Spider):
         return obj.version.project.name
@@ -309,7 +320,7 @@ class SpiderAdmin(admin.ModelAdmin):
     def start_spider(self, obj: models.Spider):
         return format_html(
             '<a class="button" href="{}">启动</a>',
-            f"/admin/django_scrapyd_manager/spider/{obj.id}/start/"
+            f"{admin_prefix}/{admin_project_name}/{models.Spider._meta.model_name}/{obj.id}/start/"
         )
     start_spider.short_description = "运行"
 
@@ -330,11 +341,12 @@ class SpiderAdmin(admin.ModelAdmin):
 
 @admin.register(models.SpiderGroup)
 class SpiderGroupAdmin(admin.ModelAdmin):
-    list_display = ("name", "node", "project", "related_spiders", "formatted_kwargs", "description", "start_spider_group", "create_time")
+    list_display = ("name", "node", "project", "related_spiders", "formatted_kwargs", "formatted_version", "start_spider_group", "create_time")
     readonly_fields = ("create_time", "update_time")
     # filter_horizontal = ("nodes",)
     form = forms.SpiderGroupForm
     actions = ["start_group_spiders"]
+    list_filter = ("node",)
     fields = (
         "name",
         ("node", "project"),
@@ -345,6 +357,19 @@ class SpiderGroupAdmin(admin.ModelAdmin):
         "create_time",
         "update_time",
     )
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related("project", "node", "version", "version__project")
+
+    def formatted_version(self, obj: models.SpiderGroup):
+        if obj.version:
+            return obj.version
+        latest = obj.project.latest_version
+        if latest:
+            return f"自动最新版本[{latest.short_path}]"
+        return "自动最新版本[暂无可用版本]"
+
+    formatted_version.short_description = "版本"
 
     def formatted_kwargs(self, obj: models.SpiderGroup):
         args = []
@@ -358,7 +383,7 @@ class SpiderGroupAdmin(admin.ModelAdmin):
     def related_spiders(self, obj: models.SpiderGroup):
         spiders = []
         for spider in obj.resolved_spiders:
-            href = f"/admin/django_scrapyd_manager/spider/?id={spider.id}"
+            href = f"{admin_prefix}/{admin_project_name}/{models.Spider._meta.model_name}/?id={spider.id}"
             spiders.append(f"<a href='{href}'>{spider.name}</a>")
         if len(spiders) == 5:
             spiders.append("···")
@@ -368,7 +393,7 @@ class SpiderGroupAdmin(admin.ModelAdmin):
     def start_spider_group(self, obj: models.SpiderGroup):
         return format_html(
             '<a class="button" href="{}">启动</a>',
-            f"/admin/django_scrapyd_manager/spidergroup/{obj.id}/start/"
+            f"{admin_prefix}/{admin_project_name}/{models.SpiderGroup._meta.model_name}/{obj.id}/start/"
         )
     start_spider_group.short_description = "运行"
 
@@ -459,7 +484,7 @@ class SpiderGroupAdmin(admin.ModelAdmin):
             except Exception as e:
                 self.message_user(request, f"组 {group.name} -> 启动爬虫 {spider.name} 失败: {e}",
                                   level=messages.ERROR)
-        return redirect(request.META.get("HTTP_REFERER", "/admin/django_scrapyd_manager/spidergroup/"))
+        return redirect(request.META.get("HTTP_REFERER", f"{admin_prefix}/{admin_project_name}/{models.SpiderGroup._meta.model_name}/"))
 
     class Media:
         js = ("admin/js/core.js", "js/spider_group_linked.js")
@@ -561,13 +586,13 @@ class JobAdmin(admin.ModelAdmin):
             self.message_user(request, f"成功停止任务 {job.job_id} ({job.spider.name})", level=messages.SUCCESS)
         except Exception as e:
             self.message_user(request, f"停止任务失败: {e}", level=messages.ERROR)
-        return redirect(request.META.get("HTTP_REFERER", "/admin/django_scrapyd_manager/job/"))
+        return redirect(request.META.get("HTTP_REFERER", f"{admin_prefix}/{admin_project_name}/{models.Job._meta.model_name}/"))
 
     def stop_job(self, obj: models.Job):
         if obj.status == "running":  # 可选: 只在运行中显示按钮
             return format_html(
                 '<a class="button" href="{}">停止</a>',
-                f"/admin/django_scrapyd_manager/job/{obj.id}/stop/"
+                f"{admin_prefix}/{admin_project_name}/{models.Job._meta.model_name}/{obj.id}/stop/"
             )
         return "-"
     stop_job.short_description = "操作"

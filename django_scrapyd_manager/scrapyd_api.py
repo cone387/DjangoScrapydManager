@@ -18,7 +18,7 @@ def _auth_for_node(node: models.Node):
     return None
 
 
-def start_spider(spider: models.Spider) -> models.Job | None:
+def start_spider(spider: models.Spider) -> bool:
     """启动爬虫并返回 Job"""
     url = f"{spider.version.project.node.url}/schedule.json"
     data = {
@@ -29,28 +29,15 @@ def start_spider(spider: models.Spider) -> models.Job | None:
     resp.raise_for_status()
     result = resp.json()
     job_id = result.get("jobid")
-
     if not job_id:
-        return None
+        raise ValueError(f"爬虫启动失败：{result}")
+    return True
 
-    job = models.Job(
-        spider=spider,
-        job_id=job_id,
-        start_time=models.datetime.now(),
-        log_url=f"/logs/{spider.version.project.name}/{spider.name}/{job_id}.log",
-        status="pending",
-    )
-    return job
-
-
-def start_spiders(spiders: List[models.Spider]) -> List[models.Job]:
+def start_spiders(spiders: List[models.Spider]) -> bool:
     """批量启动爬虫"""
-    jobs = []
     for spider in spiders:
-        job = start_spider(spider)
-        if job:
-            jobs.append(job)
-    return jobs
+        start_spider(spider)
+    return True
 
 
 def stop_spider(spider: models.Spider) -> List[models.Job] | None:
@@ -290,11 +277,3 @@ def daemon_status(node: models.Node) -> dict:
     resp = requests.get(url, auth=_auth_for_node(node), timeout=15)
     resp.raise_for_status()
     return resp.json()
-
-
-def node_info(node: models.Node) -> dict:
-    """聚合节点的基本信息（状态、项目、版本、爬虫）"""
-    return {
-        "status": daemon_status(node),
-        "projects": sync_node_projects(node, include_version=True),
-    }

@@ -1,9 +1,52 @@
 [project]
-name = "djangoscrapydmanager"
+name = "django-scrapyd-manager"
 version = "0.1.0"
-description = "Add your description here"
+description = "A Django application for managing Scrapyd nodes, projects, spiders and jobs"
+long_description = """
+DjangoScrapydManager is a Django application that provides a comprehensive interface for managing Scrapyd nodes, including projects, versions, spiders and jobs. It allows you to monitor and control your web scraping tasks from a centralized Django admin interface.
+"""
 requires-python = ">=3.13"
 dependencies = [
     "django>=5.2.5",
     "requests>=2.32.4",
 ]
+authors = [
+    { name = "Cone387", email = "1183008540@qq.com" },
+]
+license = { text = "MIT" }
+keywords = ["django", "scrapyd", "scrapy", "web-scraping", "manager"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Framework :: Django",
+    "Framework :: Django :: 5.2",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+urls = { Homepage = "https://github.com/cone387/DjangoScrapydManager", Repository = "https://github.com/cone387/DjangoScrapydManager" }
+
+[tool.setuptools.packages.find]
+where = ["django_scrapyd_manager"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.black]
+line-length = 88
+include = '\.pyi?$'
+exclude = '''
+/(\.
+  |venv
+  |__pycache__
+  |build
+  |dist
+)/
+'''
+
