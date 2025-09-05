@@ -8,12 +8,139 @@ from . import models
 from . import scrapyd_api
 from .models import Project
 
+ALLOWED_SCRAPY_CUSTOM_SETTINGS = {
+  "CONCURRENT_REQUESTS": {
+    "default": 16,
+    "description": "Scrapy 全局最大并发请求数"
+  },
+  "CONCURRENT_REQUESTS_PER_DOMAIN": {
+    "default": 8,
+    "description": "每个域名最大并发请求数"
+  },
+  "CONCURRENT_REQUESTS_PER_IP": {
+    "default": 0,
+    "description": "每个 IP 最大并发请求数，0 表示禁用"
+  },
+  "DOWNLOAD_DELAY": {
+    "default": 0,
+    "description": "下载延迟，单位秒"
+  },
+  "RANDOMIZE_DOWNLOAD_DELAY": {
+    "default": True,
+    "description": "是否随机化下载延迟"
+  },
+  "AUTOTHROTTLE_ENABLED": {
+    "default": False,
+    "description": "是否启用自动限速"
+  },
+  "AUTOTHROTTLE_START_DELAY": {
+    "default": 5,
+    "description": "自动限速起始延迟"
+  },
+  "AUTOTHROTTLE_MAX_DELAY": {
+    "default": 60,
+    "description": "自动限速最大延迟"
+  },
+  "COOKIES_ENABLED": {
+    "default": True,
+    "description": "是否启用 Cookies"
+  },
+  "COOKIES_DEBUG": {
+    "default": False,
+    "description": "打印 Cookies 调试信息"
+  },
+  "RETRY_ENABLED": {
+    "default": True,
+    "description": "是否启用请求重试"
+  },
+  "RETRY_TIMES": {
+    "default": 2,
+    "description": "请求最大重试次数"
+  },
+  "DOWNLOAD_TIMEOUT": {
+    "default": 180,
+    "description": "下载超时，单位秒"
+  },
+  "REDIRECT_ENABLED": {
+    "default": True,
+    "description": "是否允许 HTTP 重定向"
+  },
+  "USER_AGENT": {
+    "default": "Scrapy/VERSION (+https://scrapy.org)",
+    "description": "请求 User-Agent"
+  },
+  "DEFAULT_REQUEST_HEADERS": {
+    "default": {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
+    "description": "默认请求头"
+  },
+  "ITEM_PIPELINES": {
+    "default": {},
+    "description": "Item 管道配置，格式为 {'路径': 优先级}"
+  },
+  "DOWNLOADER_MIDDLEWARES": {
+    "default": {},
+    "description": "下载器中间件配置，格式为 {'路径': 优先级}"
+  },
+  "SPIDER_MIDDLEWARES": {
+    "default": {},
+    "description": "爬虫中间件配置，格式为 {'路径': 优先级}"
+  },
+  "LOG_LEVEL": {
+    "default": "DEBUG",
+    "description": "日志等级，可选 DEBUG/INFO/WARNING/ERROR/CRITICAL"
+  },
+  "LOG_ENABLED": {
+    "default": True,
+    "description": "是否启用日志"
+  },
+  "FEED_FORMAT": {
+    "default": "json",
+    "description": "导出文件格式，如 json/csv/xml"
+  },
+  "FEED_URI": {
+    "default": "",
+    "description": "导出文件路径或 URI"
+  },
+  "ROBOTSTXT_OBEY": {
+    "default": True,
+    "description": "是否遵守 robots.txt"
+  },
+  "DEPTH_LIMIT": {
+    "default": 0,
+    "description": "爬取深度限制，0 表示无限"
+  },
+  "DEPTH_PRIORITY": {
+    "default": 0,
+    "description": "深度优先或广度优先，>0 深度优先，<0 广度优先"
+  },
+  "EXTENSIONS": {
+    "default": {},
+    "description": "Scrapy 扩展配置，格式为 {'路径': 优先级}"
+  },
+  "TELNETCONSOLE_ENABLED": {
+    "default": True,
+    "description": "是否启用 Telnet 控制台"
+  },
+  "DUPEFILTER_CLASS": {
+    "default": "scrapy.dupefilters.RFPDupeFilter",
+    "description": "去重过滤器类"
+  },
+  "SCHEDULER": {
+    "default": "scrapy.core.scheduler.Scheduler",
+    "description": "Scrapy 调度器类"
+  }
+}
+
 
 class SpiderGroupForm(forms.ModelForm):
     spiders_select = forms.ModelMultipleChoiceField(
         queryset=models.Spider.objects.none(),
         widget=widgets.FilteredSelectMultiple("爬虫", is_stacked=False),
         required=False,
+    )
+    settings = forms.JSONField(
+        required=False,
+        help_text="Scrapy 支持的配置项(JSON)，示例: {\"CONCURRENT_REQUESTS\": 8}"
     )
 
     class Meta:
@@ -41,6 +168,15 @@ class SpiderGroupForm(forms.ModelForm):
         else:
             self.fields["version"].empty_label = "自动最新版本[暂无可用版本]"
         self.fields["version"].label_from_instance = lambda obj: obj.short_path
+
+    def clean_settings(self):
+        data = self.cleaned_data.get("settings") or {}
+        if not isinstance(data, dict):
+            raise ValidationError("custom_settings 必须是一个 JSON 对象")
+        invalid_keys = [k for k in data.keys() if k not in ALLOWED_SCRAPY_CUSTOM_SETTINGS]
+        if invalid_keys:
+            raise ValidationError(f"无效的配置项: {invalid_keys}")
+        return data
 
     def clean(self):
         cleaned_data = super().clean()

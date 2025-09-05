@@ -2,12 +2,15 @@
 import requests
 from typing import List
 from logging import getLogger
-from django.db.models import Q
 from .cache import ttl_cache
 from . import models
 from datetime import datetime
 
 logger = getLogger(__name__)
+
+
+class ScrapydResponseError(Exception):
+    pass
 
 
 def _auth_for_node(node: models.Node):
@@ -20,6 +23,12 @@ def _auth_for_node(node: models.Node):
 def start_spider(spider: models.Spider) -> bool:
     """启动爬虫并返回 Job"""
     url = f"{spider.version.project.node.url}/schedule.json"
+    group = spider.kwargs.pop("__group__", "server")
+    for k, v in list(spider.kwargs.items()):
+        if k.startswith("__"):
+            spider.kwargs.pop(k)
+    job_id = spider.kwargs.get("job_id") or spider.id
+    spider.kwargs["jobid"] = f"{group}:{spider.version.version}:{spider.name}:{job_id}"
     data = {
         "project": spider.version.project.name,
         "spider": spider.name,
@@ -32,7 +41,7 @@ def start_spider(spider: models.Spider) -> bool:
     job_id = result.get("jobid")
     if not job_id:
         raise ValueError(f"爬虫启动失败：{result}")
-    return True
+    return job_id
 
 def start_spiders(spiders: List[models.Spider]) -> bool:
     """批量启动爬虫"""
@@ -194,9 +203,9 @@ def sync_project_versions(project: models.Project):
     versions = data.get("versions", [])
     project_versions = []
     for version in versions:
-        project_versions.append(models.ProjectVersion(project=project, version=version))
-    models.ProjectVersion.objects.filter(~Q(version__in=versions), project=project).update(is_deleted=True)
-    models.ProjectVersion.objects.bulk_create(project_versions, ignore_conflicts=True)
+        project_versions.append(models.ProjectVersion(project=project, version=version, sync_status=models.SyncStatus.SUCCESS))
+    models.ProjectVersion.objects.bulk_create(
+        project_versions, update_conflicts=True, unique_fields=("project", "version"), update_fields=["sync_status"])
     logger.info(f"sync {len(project_versions)} versions for {project}")
 
 
@@ -209,7 +218,7 @@ def sync_node_projects(node: models.Node, include_version=True):
     projects = data.get("projects", [])
 
     for project_name in projects:
-        project, created = models.Project.objects.get_or_create(node=node, name=project_name)
+        project, created = models.Project.objects.update_or_create(node=node, name=project_name, defaults={"sync_status": models.SyncStatus.SUCCESS})
         if include_version:
             sync_project_versions(project)
         # todo: 要删除已经移除的project
@@ -254,7 +263,9 @@ def delete_version(version: models.ProjectVersion):
     data = {"project": version.project.name, "version": version.version}
     resp = requests.post(url, data=data, auth=_auth_for_node(version.project.node), timeout=15)
     resp.raise_for_status()
-    return resp.json()
+    ret = resp.json()
+    if ret["status"] != "ok":
+        raise ScrapydResponseError(ret["message"])
 
 
 def delete_project(project: models.Project):
@@ -263,7 +274,9 @@ def delete_project(project: models.Project):
     data = {"project": project.name}
     resp = requests.post(url, data=data, auth=_auth_for_node(project.node), timeout=15)
     resp.raise_for_status()
-    return resp.json()
+    ret = resp.json()
+    if ret["status"] != "success":
+        raise ScrapydResponseError(ret["message"])
 
 
 def daemon_status(node: models.Node) -> dict:

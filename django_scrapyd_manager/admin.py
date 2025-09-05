@@ -1,6 +1,5 @@
 # scrapyd_manager/admin.py
 from django.contrib import admin, messages
-from django.core.exceptions import ValidationError
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from datetime import datetime
@@ -8,13 +7,59 @@ from django.utils.html import format_html
 from django.urls import path
 from django.shortcuts import redirect
 from django.conf import settings
+from django.db.models.signals import post_save, post_delete
+from django.dispatch import receiver
 from . import models
 from . import scrapyd_api
 from . import forms
+import logging
+
 
 admin_project_name = "django_scrapyd_manager"
 admin_prefix = settings.FORCE_SCRIPT_NAME if settings.FORCE_SCRIPT_NAME else ''
 admin_prefix = f"{admin_prefix}/admin"
+
+
+logger = logging.getLogger("django_scrapyd_manager")
+
+
+@receiver(post_delete, sender=models.Project)
+def on_project_deleted(sender, instance: models.Project, **kwargs):
+    if instance.sync_mode in (models.SyncMode.AUTO, models.SyncMode.SYNC):
+        if instance.sync_status == models.SyncStatus.SUCCESS:
+            try:
+                scrapyd_api.delete_project(instance)
+            except Exception as e:
+                logger.exception(e)
+                instance.sync_status = models.SyncStatus.FAILED
+                instance.save()
+
+
+@receiver(post_delete, sender=models.ProjectVersion)
+def on_project_version_deleted(sender, instance: models.ProjectVersion, **kwargs):
+    if instance.sync_mode in (models.SyncMode.AUTO, models.SyncMode.SYNC):
+        if instance.sync_status == models.SyncStatus.SUCCESS:
+            try:
+                scrapyd_api.delete_version(instance)
+            except Exception as e:
+                logger.exception(e)
+                instance.sync_status = models.SyncStatus.FAILED
+                instance.save()
+
+
+@receiver(post_save, sender=models.ProjectVersion)
+def on_project_version_save(sender, instance: models.ProjectVersion, created, **kwargs):
+    if instance.sync_mode != models.SyncMode.NONE:
+        if instance.sync_status == models.SyncStatus.PENDING:
+            try:
+                scrapyd_api.add_version(instance)
+                instance.sync_status = models.SyncStatus.SUCCESS
+            except Exception as e:
+                instance.sync_status = models.SyncStatus.FAILED
+                logger.exception(e)
+            instance.save(update_fields=["sync_status"])
+    else:
+        logger.info(f"{instance.sync_mode} is {instance.sync_status}, ignored.")
 
 
 class CustomFilter(admin.SimpleListFilter):
@@ -94,26 +139,23 @@ class ProjectFilter(CustomFilter):
 
 @admin.register(models.Project)
 class ProjectAdmin(admin.ModelAdmin):
-    list_display = ("name", "latest_version", "related_versions", "create_time")
-    readonly_fields = ("create_time", "update_time")
+    list_display = ("name", "latest_version", "related_versions", "sync_mode", "sync_status", "create_time")
+    readonly_fields = ("sync_status", "create_time", "update_time")
     list_filter = (ProjectNodeFilter, )
+
+    fields = (
+        ("node", "sync_mode", "sync_status"),
+        "name",
+        "create_time",
+        "update_time",
+    )
 
     def has_change_permission(self, request, obj = ...):
         return False
 
     def delete_queryset(self, request, queryset):
         for obj in queryset:
-            try:
-                self.delete_model(request, obj)
-            except ValueError as e:
-                self.message_user(request, f"删除失败, ret: {e}")
-
-    def delete_model(self, request, obj: models.Project):
-        ret = scrapyd_api.delete_project(obj)
-        if ret.get("status") != "ok":
-            raise ValueError(ret)
-        else:
-            super().delete_model(request, obj)
+            obj.delete()
 
     def latest_version(self, obj: models.Project):
         version = obj.versions.order_by("-version").first()
@@ -162,12 +204,12 @@ class VersionProjectFilter(ProjectFilter):
 
 @admin.register(models.ProjectVersion)
 class ProjectVersionAdmin(admin.ModelAdmin):
-    list_display = ("id", "linked_version", "project", "spider_count", "has_egg_file", "description", "is_spider_synced", "create_time")
-    readonly_fields = ("is_spider_synced", "create_time", "update_time")
+    list_display = ("id", "linked_version", "project", "spider_count", "has_egg_file", "description", "sync_mode", "sync_status", "is_spider_synced", "create_time")
+    readonly_fields = ("sync_status", "is_spider_synced", "create_time", "update_time")
     list_filter = (VersionNodeFilter, VersionProjectFilter)
     form = forms.ProjectVersionForm
     fields = (
-        "node",
+        ("node", "sync_mode", "sync_status"),
         "project",
         "version",
         "description",
@@ -251,13 +293,33 @@ class SpiderProjectVersionFilter(CustomFilter):
 
 @admin.register(models.Spider)
 class SpiderAdmin(admin.ModelAdmin):
-    list_display = ("name", "project_name", "project_node_name", "start_spider", "create_time")
+    list_display = ("name", "project_name", "project_node_name", "formatted_kwargs", "formatted_settings", "start_spider", "create_time")
     readonly_fields = ("version", "name", "create_time", "update_time")
     list_filter = (SpiderNodeFilter, SpiderProjectFilter, SpiderProjectVersionFilter)
     actions = ["start_spiders"]
 
-    def has_delete_permission(self, request, obj = ...):
-        return False
+    def formatted_kwargs(self, obj: models.SpiderGroup):
+        args = []
+        for key, value in obj.kwargs.items():
+            args.append(f"{key} = {value}")
+        if len(args) == 5:
+            args.append("···")
+        return format_html('<span style="line-height: 1">%s</span>' % '<br>'.join(args))
+    formatted_kwargs.short_description = "参数(kwargs)"
+
+    def formatted_settings(self, obj: models.SpiderGroup):
+        args = []
+        for key, value in obj.settings.items():
+            args.append(f"{key} = {value}")
+        if len(args) == 5:
+            args.append("···")
+        return format_html('<span style="line-height: 1">%s</span>' % '<br>'.join(args))
+    formatted_settings.short_description = "设置(setting)"
+
+    def has_delete_permission(self, request, obj: models.Spider = None):
+        if obj is None:
+            return False
+        return obj.version.sync_mode != models.SyncMode.NONE
 
     def get_urls(self):
 
@@ -367,7 +429,7 @@ class SpiderAdmin(admin.ModelAdmin):
 
 @admin.register(models.SpiderGroup)
 class SpiderGroupAdmin(admin.ModelAdmin):
-    list_display = ("name", "node", "project", "related_spiders", "formatted_kwargs", "formatted_version", "start_spider_group", "create_time")
+    list_display = ("name", "node", "project", "related_spiders", "formatted_kwargs", "formatted_settings", "formatted_version", "start_spider_group", "create_time")
     readonly_fields = ("create_time", "update_time")
     # filter_horizontal = ("nodes",)
     form = forms.SpiderGroupForm
@@ -405,7 +467,16 @@ class SpiderGroupAdmin(admin.ModelAdmin):
         if len(args) == 5:
             args.append("···")
         return format_html('<span style="line-height: 1">%s</span>' % '<br>'.join(args))
-    formatted_kwargs.short_description = "参数"
+    formatted_kwargs.short_description = "参数(kwargs)"
+
+    def formatted_settings(self, obj: models.SpiderGroup):
+        args = []
+        for key, value in obj.settings.items():
+            args.append(f"{key} = {value}")
+        if len(args) == 5:
+            args.append("···")
+        return format_html('<span style="line-height: 1">%s</span>' % '<br>'.join(args))
+    formatted_settings.short_description = "设置(setting)"
 
     def related_spiders(self, obj: models.SpiderGroup):
         spiders = []
@@ -435,6 +506,9 @@ class SpiderGroupAdmin(admin.ModelAdmin):
                 messages.warning(request, f"爬虫组 {group.name} 内没有爬虫")
                 continue
             for spider in spiders:
+                spider.kwargs["__group__"] = group.name
+                spider.kwargs.update(group.kwargs)
+                spider.settings.update(group.settings)
                 try:
                     job_id = scrapyd_api.start_spider(spider)
                     messages.success(request, f"组 {group.name} -> 启动爬虫 {spider.name} (job_id={job_id})")
@@ -504,6 +578,7 @@ class SpiderGroupAdmin(admin.ModelAdmin):
         if not spiders:
             self.message_user(request, f"组 {group.name} 内没有爬虫", level=messages.WARNING)
         for spider in spiders:
+            spider.kwargs["__group__"] = group.name
             spider.kwargs.update(group.kwargs)
             spider.settings.update(group.settings)
             try:
