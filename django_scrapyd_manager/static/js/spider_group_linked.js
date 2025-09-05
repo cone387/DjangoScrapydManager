@@ -79,7 +79,9 @@
         $project.on("change", function() {
             let projectId = $(this).val();
             if (projectId) {
-                loadVersions(projectId);
+                if($version.length && !$version.is("input")){
+                    loadVersions(projectId);
+                }
             } else {
                 $version.empty();
                 $spiders.empty();
@@ -88,7 +90,9 @@
 
         $version.on("change", function() {
             let versionId = $(this).val();
-            loadSpiders(versionId);
+            if($spiders.length){
+                loadSpiders(versionId);
+            }
             // if (versionId) {
             //     if(versionId === '0'){
             //         versionId = undefined

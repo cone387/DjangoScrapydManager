@@ -1,5 +1,6 @@
 # scrapyd_manager/admin.py
 from django.contrib import admin, messages
+from django.core.exceptions import ValidationError
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from datetime import datetime
@@ -10,7 +11,6 @@ from django.conf import settings
 from . import models
 from . import scrapyd_api
 from . import forms
-
 
 admin_project_name = "django_scrapyd_manager"
 admin_prefix = settings.FORCE_SCRIPT_NAME if settings.FORCE_SCRIPT_NAME else ''
@@ -94,15 +94,26 @@ class ProjectFilter(CustomFilter):
 
 @admin.register(models.Project)
 class ProjectAdmin(admin.ModelAdmin):
-    list_display = ("name", "latest_version", "related_versions", "is_deleted", "create_time")
+    list_display = ("name", "latest_version", "related_versions", "create_time")
     readonly_fields = ("create_time", "update_time")
     list_filter = (ProjectNodeFilter, )
 
     def has_change_permission(self, request, obj = ...):
         return False
 
-    def has_delete_permission(self, request, obj = ...):
-        return False
+    def delete_queryset(self, request, queryset):
+        for obj in queryset:
+            try:
+                self.delete_model(request, obj)
+            except ValueError as e:
+                self.message_user(request, f"删除失败, ret: {e}")
+
+    def delete_model(self, request, obj: models.Project):
+        ret = scrapyd_api.delete_project(obj)
+        if ret.get("status") != "ok":
+            raise ValueError(ret)
+        else:
+            super().delete_model(request, obj)
 
     def latest_version(self, obj: models.Project):
         version = obj.versions.order_by("-version").first()
@@ -134,6 +145,9 @@ class ProjectAdmin(admin.ModelAdmin):
             scrapyd_api.sync_node_projects(node)
         return super().changelist_view(request, extra_context)
 
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related("node")
+
 
 class VersionNodeFilter(ProjectNodeFilter):
     # 使用与 Django 内置 FieldListFilter 一致的参数名，便于复用已有的默认逻辑
@@ -148,15 +162,24 @@ class VersionProjectFilter(ProjectFilter):
 
 @admin.register(models.ProjectVersion)
 class ProjectVersionAdmin(admin.ModelAdmin):
-    list_display = ("id", "linked_version", "project", "spider_count", "is_spider_synced", "is_deleted", "create_time")
-    readonly_fields = ("create_time", "update_time")
+    list_display = ("id", "linked_version", "project", "spider_count", "has_egg_file", "description", "is_spider_synced", "create_time")
+    readonly_fields = ("is_spider_synced", "create_time", "update_time")
     list_filter = (VersionNodeFilter, VersionProjectFilter)
+    form = forms.ProjectVersionForm
+    fields = (
+        "node",
+        "project",
+        "version",
+        "description",
+        "egg_file",
+    )
 
-    def has_change_permission(self, request, obj = ...):
+    def has_egg_file(self, obj: models.ProjectVersion):
+        if obj.egg_file and obj.egg_file.storage.exists(obj.egg_file.name):
+            return True
         return False
-
-    def has_delete_permission(self, request, obj = ...):
-        return False
+    has_egg_file.boolean = True
+    has_egg_file.short_description = "egg文件"
 
     def linked_version(self, obj: models.ProjectVersion):
         if obj.version.isdigit():
@@ -171,6 +194,9 @@ class ProjectVersionAdmin(admin.ModelAdmin):
     def spider_count(self, obj: models.ProjectVersion):
         return obj.spiders.count()
     spider_count.short_description = "爬虫数量"
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related("project", "project__node")
 
     def changelist_view(self, request, extra_context=None):
         node_id = request.GET.get(VersionProjectFilter.node_filter.parameter_name)
@@ -190,6 +216,9 @@ class ProjectVersionAdmin(admin.ModelAdmin):
             q[VersionProjectFilter.parameter_name] = project_name
             request.GET = q
         return super().changelist_view(request, extra_context)
+
+    class Media:
+        js = ("admin/js/core.js", "js/spider_group_linked.js")
 
 
 class SpiderNodeFilter(ProjectNodeFilter):
@@ -216,19 +245,16 @@ class SpiderProjectVersionFilter(CustomFilter):
         versions = models.ProjectVersion.objects.filter(
             project__node_id=node_id,
             project__name=project_name,
-        ).values_list('version', flat=True).order_by("-version")
-        return [(v, f'{v}({datetime.fromtimestamp(int(v))})') for v in versions]
+        )
+        return [(v.version, v.short_path) for v in versions]
 
 
 @admin.register(models.Spider)
 class SpiderAdmin(admin.ModelAdmin):
     list_display = ("name", "project_name", "project_node_name", "start_spider", "create_time")
-    readonly_fields = ("create_time", "update_time")
+    readonly_fields = ("version", "name", "create_time", "update_time")
     list_filter = (SpiderNodeFilter, SpiderProjectFilter, SpiderProjectVersionFilter)
     actions = ["start_spiders"]
-
-    def has_change_permission(self, request, obj = ...):
-        return False
 
     def has_delete_permission(self, request, obj = ...):
         return False
@@ -275,9 +301,9 @@ class SpiderAdmin(admin.ModelAdmin):
             ).first()
             if project_version:
                 scrapyd_api.sync_project_version_spiders(project_version)
-                return models.Spider.objects.filter(version=project_version)
+                return models.Spider.objects.filter(version=project_version).prefetch_related("version", "version__project", "version__project__node")
             return models.Spider.objects.none()
-        return super().get_queryset(request).prefetch_related("version", "version__project")
+        return super().get_queryset(request).prefetch_related("version", "version__project", "version__project__node")
 
     def get_object(self, request, object_id, from_field = ...):
         return get_object_or_404(models.Spider, pk=object_id)
@@ -354,12 +380,13 @@ class SpiderGroupAdmin(admin.ModelAdmin):
         "spiders_select",
         "description",
         "kwargs",
+        "settings",
         "create_time",
         "update_time",
     )
 
     def get_queryset(self, request):
-        return super().get_queryset(request).select_related("project", "node", "version", "version__project")
+        return super().get_queryset(request).select_related("project", "node", "version", "version__project", "version__project__node")
 
     def formatted_version(self, obj: models.SpiderGroup):
         if obj.version:
@@ -477,6 +504,8 @@ class SpiderGroupAdmin(admin.ModelAdmin):
         if not spiders:
             self.message_user(request, f"组 {group.name} 内没有爬虫", level=messages.WARNING)
         for spider in spiders:
+            spider.kwargs.update(group.kwargs)
+            spider.settings.update(group.settings)
             try:
                 job_id = scrapyd_api.start_spider(spider)
                 self.message_user(request, f"组 {group.name} -> 启动爬虫 {spider} (job_id={job_id})",
@@ -617,7 +646,7 @@ class JobAdmin(admin.ModelAdmin):
         else:
             return models.Job.objects.none()
         scrapyd_api.sync_jobs(node)
-        return super().get_queryset(request).prefetch_related("spider", "spider__version", "spider__version__project")
+        return super().get_queryset(request).prefetch_related("spider", "spider__version", "spider__version__project", "spider__version__project__node")
 
     def get_object(self, request, object_id, from_field = ...):
         return get_object_or_404(models.Job, pk=object_id)

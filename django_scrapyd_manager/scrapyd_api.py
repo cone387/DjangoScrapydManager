@@ -1,5 +1,4 @@
 # scrapyd_manager/scrapyd_api.py
-import os
 import requests
 from typing import List
 from logging import getLogger
@@ -24,6 +23,8 @@ def start_spider(spider: models.Spider) -> bool:
     data = {
         "project": spider.version.project.name,
         "spider": spider.name,
+        "setting": [f"{k}={v}" for k, v in spider.settings.items()],
+        **spider.kwargs,
     }
     resp = requests.post(url, data=data, auth=_auth_for_node(spider.version.project.node), timeout=15)
     resp.raise_for_status()
@@ -235,22 +236,16 @@ def sync_project_version_spiders(version: models.ProjectVersion) -> bool:
     return version.is_spider_synced
 
 
-def add_version(version: models.ProjectVersion, egg_path: str):
+def add_version(version: models.ProjectVersion):
     """部署新版本"""
     url = f"{version.project.node.url}/addversion.json"
-    if not os.path.exists(egg_path):
-        return {"status": "error", "reason": "egg file not found"}
-    files = {"egg": open(egg_path, "rb")}
+    if not version.egg_file:
+        raise Exception("egg_file is not set")
+    files = {"egg": version.egg_file.open()}
     data = {"project": version.project.name, "version": version.version}
-    try:
-        resp = requests.post(url, data=data, files=files, auth=_auth_for_node(version.project.node), timeout=60)
-        resp.raise_for_status()
-        return resp.json()
-    finally:
-        try:
-            files["egg"].close()
-        except Exception:
-            pass
+    resp = requests.post(url, data=data, files=files, auth=_auth_for_node(version.project.node), timeout=60)
+    resp.raise_for_status()
+    return resp.json()
 
 
 def delete_version(version: models.ProjectVersion):

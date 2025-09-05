@@ -54,10 +54,16 @@ class Node(models.Model):
         return f"{"https" if self.ssl else "http"}://{host}:{port}"
 
 
+class SyncModeChoice(models.TextChoices):
+    AUTO = "auto", "自动管理"
+    SYNC = "sync", "互相绑定"
+    NONE = "none", "无需绑定"
+
+
 class Project(models.Model):
-    node = models.ForeignKey(Node, on_delete=models.DO_NOTHING, verbose_name="节点", db_constraint=False, related_name="projects")
+    node = models.ForeignKey(Node, on_delete=models.CASCADE, verbose_name="节点", db_constraint=False, related_name="projects")
     name = models.CharField(max_length=255, verbose_name="项目名")
-    is_deleted = models.BooleanField(default=False, verbose_name="是否已被删除")
+    sync_mode = models.CharField(max_length=10, default=SyncModeChoice.AUTO, choices=SyncModeChoice.choices, verbose_name="同步模式")
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
@@ -75,10 +81,12 @@ class Project(models.Model):
 
 
 class ProjectVersion(models.Model):
-    project = models.ForeignKey(Project, on_delete=models.DO_NOTHING, verbose_name="项目", db_constraint=False, related_name="versions")
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, verbose_name="项目", db_constraint=False, related_name="versions")
     version = models.CharField(max_length=255, verbose_name='版本')
     is_spider_synced = models.BooleanField(default=False, verbose_name="是否已同步当前版本爬虫")
-    is_deleted = models.BooleanField(default=False, verbose_name="是否已被删除")
+    egg_file = models.FileField(upload_to="eggs/", null=True, blank=True, verbose_name="Egg 文件")
+    description = models.CharField(max_length=200, null=True, blank=True, verbose_name="描述")
+    sync_mode = models.CharField(max_length=10, choices=SyncModeChoice.choices, default=SyncModeChoice.AUTO, verbose_name="同步模式")
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
@@ -109,8 +117,10 @@ class ProjectVersion(models.Model):
 
 
 class Spider(models.Model):
-    version = models.ForeignKey(ProjectVersion, on_delete=models.DO_NOTHING, verbose_name="版本", db_constraint=False, related_name="spiders")
+    version = models.ForeignKey(ProjectVersion, on_delete=models.CASCADE, verbose_name="版本", db_constraint=False, related_name="spiders")
     name = models.CharField(max_length=255, verbose_name="爬虫名称")
+    kwargs = models.JSONField(default=dict, null=True, blank=True, verbose_name="Scrapy自定义参数(对组内所有爬虫生效)")
+    settings = models.JSONField(default=dict, null=True, blank=True, verbose_name="Scrapy自定义设置(对组内所有爬虫生效)")
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
@@ -130,7 +140,8 @@ class SpiderGroup(models.Model):
     project = models.ForeignKey(Project, db_constraint=False, verbose_name='项目', on_delete=models.CASCADE)
     version = models.ForeignKey(ProjectVersion, verbose_name='版本', null=True, blank=True, on_delete=models.CASCADE)
     spiders = models.JSONField(default=list, verbose_name="爬虫")
-    kwargs = models.JSONField(default=dict, verbose_name="参数", null=True, blank=True)
+    kwargs = models.JSONField(default=dict, null=True, blank=True, verbose_name="Scrapy自定义参数(对组内所有爬虫生效)")
+    settings = models.JSONField(default=dict, null=True, blank=True, verbose_name="Scrapy自定义设置(对组内所有爬虫生效)")
     description = models.CharField(max_length=200, blank=True, null=True, verbose_name="任务组描述")
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
