@@ -187,7 +187,7 @@ class ProjectAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
             obj.delete()
 
     def latest_version(self, obj: models.Project):
-        version = obj.versions.order_by("-version").first()
+        version = obj.latest_version
         if version:
             href = f"{admin_prefix}/{admin_project_name}/{models.ProjectVersion._meta.model_name}/?id={version.id}"
             return format_html(f'<a href="{href}">{version.pretty}</a>')
@@ -198,20 +198,6 @@ class ProjectAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
         href = f"{admin_prefix}/{admin_project_name}/{models.ProjectVersion._meta.model_name}/?project_id={obj.id}"
         return format_html(f'<a href="{href}">{obj.versions.count()}</a>')
     related_versions.short_description = "版本数量"
-
-    # def changelist_view(self, request, extra_context=None):
-    #
-    #     node_id = request.GET.get(ProjectNodeFilter.parameter_name)
-    #     if node_id:
-    #         node = get_object_or_404(models.Node, pk=node_id)
-    #     else:
-    #         node = models.Node.objects.order_by('name').first()
-    #     if node:
-    #         params = request.GET.copy()
-    #         params[ProjectNodeFilter.parameter_name] = str(node.id)
-    #         request.GET = params
-    #         scrapyd_api.sync_node_projects(node)
-    #     return super().changelist_view(request, extra_context)
 
     def get_queryset(self, request):
         return super().get_queryset(request).select_related("node")
@@ -265,28 +251,6 @@ class ProjectVersionAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
 
     def get_queryset(self, request):
         return super().get_queryset(request).select_related("project", "project__node")
-
-    def changelist_view(self, request, extra_context=None):
-        for k in request.GET:
-            if k not in [VersionProjectFilter.node_filter.parameter_name, VersionProjectFilter.parameter_name]:
-                break
-        else:
-            node_id = request.GET.get(VersionProjectFilter.node_filter.parameter_name)
-            project_name = request.GET.get(VersionProjectFilter.parameter_name)
-            if node_id:
-                node = get_object_or_404(models.Node, pk=node_id)
-            else:
-                node = models.Node.objects.order_by('name').first()
-            if node:
-                if not project_name:
-                    project = models.Project.objects.filter(node=node).order_by("name").first()
-                    if project:
-                        project_name = project.name
-                q = request.GET.copy()
-                q[VersionProjectFilter.node_filter.parameter_name] = str(node.id)
-                q[VersionProjectFilter.parameter_name] = project_name
-                request.GET = q
-        return super().changelist_view(request, extra_context)
 
     class Media:
         js = ("admin/js/core.js", "js/spider_group_linked.js")
@@ -411,44 +375,6 @@ class SpiderAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
 
     def get_queryset(self, request):
         return super().get_queryset(request).prefetch_related("version", "version__project", "version__project__node")
-
-    def changelist_view(self, request, extra_context=None):
-        for k in request.GET:
-            if k not in [SpiderNodeFilter.parameter_name, SpiderProjectFilter.parameter_name, SpiderProjectVersionFilter.parameter_name]:
-                break
-        else:
-            node_id = request.GET.get(SpiderNodeFilter.parameter_name)
-            project_name = request.GET.get(SpiderProjectFilter.parameter_name)
-            version = request.GET.get(SpiderProjectVersionFilter.parameter_name)
-            last_node_id = request.COOKIES.get("last_node_id")
-            last_project_name = request.COOKIES.get("last_project_name")
-            new_query = request.GET.copy()
-            if last_node_id and last_node_id != node_id:
-                new_query.pop(SpiderProjectFilter.parameter_name, None)
-                new_query.pop(SpiderProjectVersionFilter.parameter_name, None)
-                version = project_name = None
-            elif last_project_name and last_project_name != project_name:
-                new_query.pop(SpiderProjectVersionFilter.parameter_name, None)
-                version = None
-            if not node_id:
-                node_id = models.Node.objects.order_by('name').values_list("id", flat=True).first()
-            if node_id:
-                new_query[SpiderNodeFilter.parameter_name] = str(node_id)
-                if not project_name:
-                    project = models.Node.default_project_of_node(node_id)
-                    if project:
-                        project_name = project.name if project else None
-                        new_query[SpiderProjectFilter.parameter_name] = project_name
-                        if not version:
-                            version = project.latest_version
-                            if version:
-                                new_query[SpiderProjectVersionFilter.parameter_name] = version.version
-            request.GET = new_query
-            response = super().changelist_view(request, extra_context)
-            response.set_cookie("last_node_id", node_id)
-            response.set_cookie("last_project_name", project_name)
-            return response
-        return super().changelist_view(request, extra_context)
 
     def start_spider(self, obj: models.Spider):
         return format_html(
@@ -779,22 +705,6 @@ class JobAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
 
     def get_object(self, request, object_id, from_field = ...):
         return get_object_or_404(models.Job, pk=object_id)
-
-    def changelist_view(self, request, extra_context=None):
-        if JobNodeFilter.parameter_name not in request.GET:
-            default_node = models.Node.objects.order_by('name').first()
-            if default_node:
-                q = request.GET.copy()
-                q[JobNodeFilter.parameter_name] = str(default_node.id)
-                project_name = request.GET.get(JobProjectFilter.parameter_name)
-                if project_name:
-                    default_project = models.Project.objects.filter(node_id=default_node.id, name=project_name).first()
-                else:
-                    default_project = models.Project.objects.filter(node_id=default_node.id).first()
-                if default_project:
-                    q[JobProjectFilter.parameter_name] = default_project.name
-                request.GET = q
-        return super().changelist_view(request, extra_context)
 
 
 @admin.register(models.JobInfoLog)
