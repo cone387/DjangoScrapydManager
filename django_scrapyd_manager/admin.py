@@ -739,31 +739,27 @@ class JobInfoLogAdmin(admin.ModelAdmin):
     def get_queryset(self, request):
         return super().get_queryset(request).prefetch_related("job")
 
-# @admin.register(models.SpiderGuardian)
-# class SpiderGuardianAdmin(admin.ModelAdmin):
-#     list_display = (
-#         "job_id", "job_project_version", "job_spider", "start_time", "end_time", "status", "pid", "stop_job",
-#     )
-#     readonly_fields = ("create_time", "update_time", "start_time", "end_time", "pid", "log_url", "items_url", "spider", "status")
-#     list_filter = (JobStatusFilter, JobNodeFilter, JobProjectFilter)
-#     actions = ["start_jobs", "stop_jobs"]
-#     ordering = ("-status", "-start_time")
-#
-#     def job_node(self, obj):
-#         return obj.spider.version.project.node.name
-#     job_node.admin_order_field = "spider__version__project__node__name"
-#     job_node.short_description = "节点名称"
-#
-#     def get_queryset(self, request):
-#         return super().get_queryset(request).prefetch_related("spider", "version", "version", "node")
-#
-#
-# @admin.register(models.SpiderGuardianLog)
-# class SpiderGuardianLogAdmin(admin.ModelAdmin):
-#     list_display = (
-#         "guardian", "node", "spider", "action", "result", "create_time",
-#     )
-#     ordering = ("-create_time", )
-#
-#     def has_change_permission(self, request, obj = ...):
-#         return False
+
+@admin.register(models.SpiderGuardian)
+class SpiderGuardianAdmin(admin.ModelAdmin):
+    list_display = (
+        "spider_group", "strategy", "description", "enable", "last_action", "interval", "last_check", "create_time",
+    )
+    readonly_fields = ("create_time", "update_time")
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).prefetch_related("spider_group", "spider_group__spiders")
+
+
+@admin.register(models.SpiderGuardianLog)
+class SpiderGuardianLogAdmin(admin.ModelAdmin):
+    list_display = (
+        "guardian", "node", "spider", "action", "result", "create_time",
+    )
+    ordering = ("-create_time", )
+
+    def has_change_permission(self, request, obj = ...):
+        return False
+
+    def has_add_permission(self, request):
+        return False

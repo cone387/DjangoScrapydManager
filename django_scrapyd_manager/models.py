@@ -167,7 +167,7 @@ class SpiderGroup(models.Model):
     node = models.ForeignKey(Node, db_constraint=False, on_delete=models.DO_NOTHING, verbose_name="节点")
     project = models.ForeignKey(Project, db_constraint=False, verbose_name='项目', on_delete=models.CASCADE)
     version = models.ForeignKey(ProjectVersion, verbose_name='版本', null=True, blank=True, on_delete=models.CASCADE)
-    spiders = models.ManyToManyField(SpiderRegistry, db_constraint=False, related_name="爬虫")
+    spiders = models.ManyToManyField(SpiderRegistry, db_constraint=False, related_name="spiders", verbose_name="爬虫")
     kwargs = models.JSONField(default=dict, null=True, blank=True, verbose_name="Scrapy自定义参数kwargs(对组内所有爬虫生效)")
     settings = models.JSONField(default=dict, null=True, blank=True, verbose_name="Scrapy自定义设置settings(对组内所有爬虫生效)")
     description = models.CharField(max_length=200, blank=True, null=True, verbose_name="任务组描述")
@@ -264,56 +264,45 @@ class JobInfoLog(models.Model):
         return str(self.job)
 
 
-# class GuardianStrategy(models.TextChoices):
-#     RESTART_ALWAYS = "restart_always", "始终重启"
-#
+class GuardianStrategy(models.TextChoices):
+    RESTART_ALWAYS = "restart_always", "始终重启"
 
-# class SpiderGuardian(models.Model):
-#     node = models.ForeignKey(Node, db_constraint=False, on_delete=models.DO_NOTHING, verbose_name="节点")
-#     project = models.ForeignKey(Project, db_constraint=False, verbose_name='项目', on_delete=models.DO_NOTHING)
-#     version = models.ForeignKey(ProjectVersion, verbose_name='版本', null=True, blank=True, on_delete=models.DO_NOTHING)
-#     spiders = models.JSONField(default=list, verbose_name="爬虫")
-#     group = models.ForeignKey(SpiderGroup, null=True, blank=True, on_delete=models.CASCADE, verbose_name="爬虫组", db_constraint=False)
-#     spider_count = models.IntegerField(default=1, verbose_name="数量")
-#     kwargs = models.JSONField(default=dict, null=True, blank=True, verbose_name="Scrapy自定义参数kwargs(对组内所有爬虫生效)")
-#     settings = models.JSONField(default=dict, null=True, blank=True, verbose_name="Scrapy自定义设置settings(对组内所有爬虫生效)")
-#     strategy = models.CharField(
-#         max_length=20,
-#         choices=GuardianStrategy.choices,
-#         default=GuardianStrategy.RESTART_ALWAYS,
-#         verbose_name="守护策略"
-#     )
-#     description = models.CharField(max_length=200, null=True, blank=True, verbose_name="描述")
-#     enable = models.BooleanField(default=True, verbose_name="是否启用守护")
-#     interval = models.IntegerField(default=60, verbose_name="检测间隔(秒)")
-#     last_check = models.DateTimeField(null=True, blank=True, verbose_name="上次检测时间")
-#     last_action = models.CharField(max_length=255, null=True, blank=True, verbose_name="上次操作说明")
-#     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
-#     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
-#
-#     class Meta:
-#         db_table = "scrapy_spider_guardian"
-#         verbose_name = verbose_name_plural = "Scrapy Spider Guardian"
-#
-#     def __str__(self):
-#         return f"Guardian[{self.node.name}]"
-#
-#
-# class SpiderGuardianLog(models.Model):
-#     guardian = models.ForeignKey(SpiderGuardian, on_delete=models.CASCADE, verbose_name="守护任务", db_constraint=False, related_name="logs")
-#     node = models.ForeignKey(Node, on_delete=models.CASCADE, verbose_name="节点")
-#     spider = models.ForeignKey(Spider, on_delete=models.CASCADE, verbose_name="爬虫")
-#     action = models.CharField(max_length=100, verbose_name="执行动作")  # 例如 "check", "start", "publish_version"
-#     result = models.CharField(max_length=50, verbose_name="结果")
-#     message = models.TextField(null=True, blank=True, verbose_name="详细日志")
-#     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
-#
-#     class Meta:
-#         db_table = "scrapy_spider_guardian_log"
-#         verbose_name = verbose_name_plural = "Scrapy Spider Guardian Log"
-#         ordering = ["-create_time"]
-#
-#     def __str__(self):
-#         return f"[{self.create_time}] {self.guardian} {self.action} ({self.result})"
-#
-#
+
+class SpiderGuardian(models.Model):
+    spider_group = models.ForeignKey(SpiderGroup, null=True, blank=True, on_delete=models.CASCADE, verbose_name="爬虫组", db_constraint=False)
+    strategy = models.CharField(max_length=20, choices=GuardianStrategy.choices, default=GuardianStrategy.RESTART_ALWAYS, verbose_name="守护策略")
+    description = models.CharField(max_length=200, null=True, blank=True, verbose_name="描述")
+    enable = models.BooleanField(default=True, verbose_name="启用")
+    interval = models.IntegerField(default=60, verbose_name="检测间隔(秒)")
+    last_check = models.DateTimeField(null=True, blank=True, verbose_name="上次检测时间")
+    last_action = models.CharField(max_length=255, null=True, blank=True, verbose_name="上次操作说明")
+    create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
+    update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+
+    class Meta:
+        db_table = "scrapy_spider_guardian"
+        verbose_name = verbose_name_plural = "Scrapy Spider Guardian"
+
+    def __str__(self):
+        return f"Guardian[{self.spider_group}]"
+
+
+class SpiderGuardianLog(models.Model):
+    guardian = models.ForeignKey(SpiderGuardian, on_delete=models.CASCADE, verbose_name="守护任务", db_constraint=False, related_name="logs")
+    node = models.ForeignKey(Node, on_delete=models.CASCADE, verbose_name="节点")
+    group = models.ForeignKey(SpiderGroup, on_delete=models.DO_NOTHING, db_constraint=False, verbose_name="关联爬虫组")
+    spider = models.ForeignKey(Spider, on_delete=models.CASCADE, verbose_name="爬虫")
+    action = models.CharField(max_length=100, verbose_name="执行动作")  # 例如 "check", "start", "publish_version"
+    result = models.CharField(max_length=50, verbose_name="结果")
+    message = models.TextField(null=True, blank=True, verbose_name="详细日志")
+    create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
+
+    class Meta:
+        db_table = "scrapy_spider_guardian_log"
+        verbose_name = verbose_name_plural = "Scrapy Spider Guardian Log"
+        ordering = ["-create_time"]
+
+    def __str__(self):
+        return f"[{self.create_time}] {self.guardian} {self.action} ({self.result})"
+
+
