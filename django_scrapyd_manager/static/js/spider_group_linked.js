@@ -88,19 +88,19 @@
             }
         });
 
-        $version.on("change", function() {
-            let versionId = $(this).val();
-            if($spiders.length){
-                loadSpiders(versionId);
-            }
-            // if (versionId) {
-            //     if(versionId === '0'){
-            //         versionId = undefined
-            //     }
-            //     loadSpiders(versionId);
-            // } else {
-            //     $spiders.empty();
-            // }
-        });
+        // $version.on("change", function() {
+        //     let versionId = $(this).val();
+        //     if($spiders.length){
+        //         loadSpiders(versionId);
+        //     }
+        //     // if (versionId) {
+        //     //     if(versionId === '0'){
+        //     //         versionId = undefined
+        //     //     }
+        //     //     loadSpiders(versionId);
+        //     // } else {
+        //     //     $spiders.empty();
+        //     // }
+        // });
     });
 })(django.jQuery);

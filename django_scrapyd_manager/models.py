@@ -70,6 +70,7 @@ class Project(models.Model):
     node = models.ForeignKey(Node, on_delete=models.CASCADE, verbose_name="节点", db_constraint=False, related_name="projects")
     name = models.CharField(max_length=255, verbose_name="项目名")
     sync_mode = models.CharField(max_length=10, default=SyncMode.AUTO, choices=SyncMode.choices, verbose_name="同步模式")
+    scrapyd_exists = models.BooleanField(default=False, verbose_name="在Scrapyd中存在")
     sync_status = models.CharField(max_length=10, default=SyncStatus.PENDING, choices=SyncStatus.choices, verbose_name="同步状态")
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
@@ -94,6 +95,7 @@ class ProjectVersion(models.Model):
     egg_file = models.FileField(upload_to="eggs/", null=True, blank=True, verbose_name="Egg 文件")
     description = models.CharField(max_length=200, null=True, blank=True, verbose_name="描述")
     sync_mode = models.CharField(max_length=10, choices=SyncMode.choices, default=SyncMode.AUTO, verbose_name="同步模式")
+    scrapyd_exists = models.BooleanField(default=False, verbose_name="在Scrapyd中存在")
     sync_status = models.CharField(max_length=10, default=SyncStatus.PENDING, choices=SyncStatus.choices, verbose_name="同步状态")
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
@@ -124,7 +126,25 @@ class ProjectVersion(models.Model):
         return self.version
 
 
+class SpiderRegistry(models.Model):
+    name = models.CharField(max_length=255, verbose_name="爬虫名称", unique=True)
+    description = models.CharField(max_length=200, null=True, blank=True, verbose_name="描述")
+    kwargs = models.JSONField(default=dict, null=True, blank=True, verbose_name="Scrapy自定义参数(对组内所有爬虫生效)")
+    settings = models.JSONField(default=dict, null=True, blank=True, verbose_name="Scrapy自定义设置(对组内所有爬虫生效)")
+    create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
+    update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+
+    class Meta:
+        db_table = "scrapy_spider_registry"
+        verbose_name = verbose_name_plural = "Spider Registry"
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
 class Spider(models.Model):
+    registry = models.ForeignKey(SpiderRegistry, on_delete=models.DO_NOTHING, related_name="version_spiders", verbose_name="全局爬虫", to_field="name")
     version = models.ForeignKey(ProjectVersion, on_delete=models.CASCADE, verbose_name="版本", db_constraint=False, related_name="spiders")
     name = models.CharField(max_length=255, verbose_name="爬虫名称")
     kwargs = models.JSONField(default=dict, null=True, blank=True, verbose_name="Scrapy自定义参数(对组内所有爬虫生效)")
@@ -147,7 +167,7 @@ class SpiderGroup(models.Model):
     node = models.ForeignKey(Node, db_constraint=False, on_delete=models.DO_NOTHING, verbose_name="节点")
     project = models.ForeignKey(Project, db_constraint=False, verbose_name='项目', on_delete=models.CASCADE)
     version = models.ForeignKey(ProjectVersion, verbose_name='版本', null=True, blank=True, on_delete=models.CASCADE)
-    spiders = models.JSONField(default=list, verbose_name="爬虫")
+    spiders = models.ManyToManyField(SpiderRegistry, db_constraint=False, related_name="爬虫")
     kwargs = models.JSONField(default=dict, null=True, blank=True, verbose_name="Scrapy自定义参数kwargs(对组内所有爬虫生效)")
     settings = models.JSONField(default=dict, null=True, blank=True, verbose_name="Scrapy自定义设置settings(对组内所有爬虫生效)")
     description = models.CharField(max_length=200, blank=True, null=True, verbose_name="任务组描述")
@@ -160,11 +180,13 @@ class SpiderGroup(models.Model):
 
     @property
     def resolved_spiders(self):
-        names = []
-        for spider in self.spiders:
-            names.append(spider["name"])
-        spiders = Spider.objects.filter(name__in=names, version=self.resolved_version, version__project=self.project)
-        return spiders
+        version = self.resolved_version
+        registry_names = self.spiders.values_list("name", flat=True)
+        return Spider.objects.filter(
+            version=version,
+            version__project=self.project,
+            name__in=registry_names
+        )
 
     class Meta:
         db_table = "scrapy_spider_group"
@@ -174,21 +196,24 @@ class SpiderGroup(models.Model):
         return self.name
 
 
-class StatusChoice(models.TextChoices):
+class JobStatus(models.TextChoices):
     running = "running", "运行中"
     finished = "finished", "已结束"
     pending = "pending", "启动中"
 
 
 class Job(models.Model):
-    spider = models.ForeignKey(Spider, on_delete=models.DO_NOTHING, verbose_name="爬虫", db_constraint=False, related_name="jobs")
+    node = models.ForeignKey(Node, on_delete=models.DO_NOTHING, verbose_name="节点", db_constraint=False, related_name="jobs")
+    project = models.ForeignKey(Project, on_delete=models.DO_NOTHING, verbose_name="项目", db_constraint=False, related_name="jobs")
+    spider = models.ForeignKey(SpiderRegistry, on_delete=models.DO_NOTHING, verbose_name="爬虫", db_constraint=False, related_name="jobs")
+    version = models.CharField(max_length=200, verbose_name="版本", null=True, blank=True)
     job_id = models.CharField(max_length=255, verbose_name="任务ID")
     job_md5 = models.CharField(max_length=32, verbose_name="md5(job)", unique=True)
     start_time = models.DateTimeField(verbose_name="开始时间")
     end_time = models.DateTimeField(null=True, blank=True, verbose_name="结束时间")
     log_url = models.CharField(max_length=255, null=True, blank=True)
     items_url = models.CharField(max_length=255, null=True, blank=True)
-    status = models.CharField(max_length=20, verbose_name="状态", choices=StatusChoice.choices)
+    status = models.CharField(max_length=20, verbose_name="状态", choices=JobStatus.choices)
     pid = models.IntegerField(null=True, blank=True, verbose_name="进程ID")
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
@@ -198,7 +223,7 @@ class Job(models.Model):
             start_time = self.start_time
             if isinstance(start_time, datetime):
                 start_time = start_time.strftime("%Y-%m-%d %H:%M:%S.%f")
-            fields = [self.spider.version.project.name, self.spider.name, self.job_id, start_time]
+            fields = [self.project.name, self.spider.name, self.job_id, start_time]
             self.job_md5 = get_md5('-'.join(fields))
         return self.job_md5
 
@@ -206,10 +231,89 @@ class Job(models.Model):
         self.gen_md5()
         super().save(*args, **kwargs)
 
+    @property
+    def resolved_version(self):
+        if not self.version:
+            job_start_timestamp = int(self.start_time.timestamp())
+            for version in self.project.versions.order_by("-version").all():
+                if version.version.isdigit():
+                    timestamp = int(version.version)
+                    if timestamp < job_start_timestamp:
+                        self.version = version
+        return self.version
+
     class Meta:
         db_table = "scrapy_job"
         verbose_name = verbose_name_plural = "Scrapy Job"
 
     def __str__(self):
-        return f"{self.spider.name} - {self.job_id} ({self.status})"
+        return self.job_id
 
+
+class JobInfoLog(models.Model):
+    job = models.ForeignKey(Job, on_delete=models.DO_NOTHING, verbose_name="Job", db_constraint=False, related_name="logs")
+    info = models.JSONField(null=True, blank=True, verbose_name="详情")
+    create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
+    update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+
+    class Meta:
+        db_table = "scrapy_job_info_log"
+        verbose_name = verbose_name_plural = "Scrapy Job Info"
+
+    def __str__(self):
+        return str(self.job)
+
+
+# class GuardianStrategy(models.TextChoices):
+#     RESTART_ALWAYS = "restart_always", "始终重启"
+#
+
+# class SpiderGuardian(models.Model):
+#     node = models.ForeignKey(Node, db_constraint=False, on_delete=models.DO_NOTHING, verbose_name="节点")
+#     project = models.ForeignKey(Project, db_constraint=False, verbose_name='项目', on_delete=models.DO_NOTHING)
+#     version = models.ForeignKey(ProjectVersion, verbose_name='版本', null=True, blank=True, on_delete=models.DO_NOTHING)
+#     spiders = models.JSONField(default=list, verbose_name="爬虫")
+#     group = models.ForeignKey(SpiderGroup, null=True, blank=True, on_delete=models.CASCADE, verbose_name="爬虫组", db_constraint=False)
+#     spider_count = models.IntegerField(default=1, verbose_name="数量")
+#     kwargs = models.JSONField(default=dict, null=True, blank=True, verbose_name="Scrapy自定义参数kwargs(对组内所有爬虫生效)")
+#     settings = models.JSONField(default=dict, null=True, blank=True, verbose_name="Scrapy自定义设置settings(对组内所有爬虫生效)")
+#     strategy = models.CharField(
+#         max_length=20,
+#         choices=GuardianStrategy.choices,
+#         default=GuardianStrategy.RESTART_ALWAYS,
+#         verbose_name="守护策略"
+#     )
+#     description = models.CharField(max_length=200, null=True, blank=True, verbose_name="描述")
+#     enable = models.BooleanField(default=True, verbose_name="是否启用守护")
+#     interval = models.IntegerField(default=60, verbose_name="检测间隔(秒)")
+#     last_check = models.DateTimeField(null=True, blank=True, verbose_name="上次检测时间")
+#     last_action = models.CharField(max_length=255, null=True, blank=True, verbose_name="上次操作说明")
+#     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
+#     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+#
+#     class Meta:
+#         db_table = "scrapy_spider_guardian"
+#         verbose_name = verbose_name_plural = "Scrapy Spider Guardian"
+#
+#     def __str__(self):
+#         return f"Guardian[{self.node.name}]"
+#
+#
+# class SpiderGuardianLog(models.Model):
+#     guardian = models.ForeignKey(SpiderGuardian, on_delete=models.CASCADE, verbose_name="守护任务", db_constraint=False, related_name="logs")
+#     node = models.ForeignKey(Node, on_delete=models.CASCADE, verbose_name="节点")
+#     spider = models.ForeignKey(Spider, on_delete=models.CASCADE, verbose_name="爬虫")
+#     action = models.CharField(max_length=100, verbose_name="执行动作")  # 例如 "check", "start", "publish_version"
+#     result = models.CharField(max_length=50, verbose_name="结果")
+#     message = models.TextField(null=True, blank=True, verbose_name="详细日志")
+#     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
+#
+#     class Meta:
+#         db_table = "scrapy_spider_guardian_log"
+#         verbose_name = verbose_name_plural = "Scrapy Spider Guardian Log"
+#         ordering = ["-create_time"]
+#
+#     def __str__(self):
+#         return f"[{self.create_time}] {self.guardian} {self.action} ({self.result})"
+#
+#

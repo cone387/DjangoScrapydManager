@@ -1,7 +1,6 @@
 import time
 
 from django import forms
-from django.contrib.admin import widgets
 from django.core.exceptions import ValidationError
 
 from . import models
@@ -133,11 +132,6 @@ ALLOWED_SCRAPY_CUSTOM_SETTINGS = {
 
 
 class SpiderGroupForm(forms.ModelForm):
-    spiders_select = forms.ModelMultipleChoiceField(
-        queryset=models.Spider.objects.none(),
-        widget=widgets.FilteredSelectMultiple("爬虫", is_stacked=False),
-        required=False,
-    )
     settings = forms.JSONField(
         required=False,
         help_text="Scrapy 支持的配置项(JSON)，示例: {\"CONCURRENT_REQUESTS\": 8}"
@@ -147,26 +141,22 @@ class SpiderGroupForm(forms.ModelForm):
         model = models.SpiderGroup
         fields = "__all__"
 
-    def __init__(self, *args, instance=None, **kwargs):
-        if instance is None:
-            instance = models.SpiderGroup()
-            instance.node = models.Node.default_node()
-            instance.project = instance.node.default_project
+    def __init__(self, *args, instance: models.SpiderGroup=None, **kwargs):
         super().__init__(*args, instance=instance, **kwargs)
-        instance: models.SpiderGroup = self.instance
-
-        self.fields["project"].queryset = instance.node.projects.all()
-        self.fields["version"].queryset = instance.project.versions.all()
-        version = instance.version
-        if not version:
-            version = instance.project.latest_version
-        if version:
-            self.fields["version"].empty_label = f"自动最新版本[{version.short_path}]"
-            spiders_select: forms.Field = self.fields["spiders_select"]
-            spiders_select.queryset = version.spiders.all()
-            spiders_select.initial = instance.resolved_spiders
+        if instance is not None:
+            self.fields["project"].widget.choices = [(p.pk, p.name) for p in instance.node.projects.all()]
+            self.fields["version"].widget.choices = [(v.pk, v.version) for v in instance.project.versions.all()]
+            self.fields["project"].queryset = models.Project.objects.filter(scrapyd_exists=True)
+            self.fields["version"].queryset = models.ProjectVersion.objects.filter(scrapyd_exists=True)
+        try:
+            latest_version = instance.project.latest_version
+        except AttributeError:
+            latest_version = None
+        if latest_version is None:
+            version_empty_label = "自动最新版本[暂无可用版本]"
         else:
-            self.fields["version"].empty_label = "自动最新版本[暂无可用版本]"
+            version_empty_label = f"自动最新版本[{latest_version.short_path}]"
+        self.fields["version"].empty_label = version_empty_label
         self.fields["version"].label_from_instance = lambda obj: obj.short_path
 
     def clean_settings(self):
@@ -180,19 +170,17 @@ class SpiderGroupForm(forms.ModelForm):
 
     def clean(self):
         cleaned_data = super().clean()
-        spiders = []
-        spiders_select = self.cleaned_data.pop("spiders_select")
-        for spider in spiders_select:
-            spiders.append({"name": spider.name})
-        cleaned_data["spiders"] = spiders
+        if self.errors:
+            return cleaned_data
+        node = cleaned_data["node"]
+        project = cleaned_data["project"]
+        version: models.ProjectVersion = cleaned_data["version"]
+        if project.node != node:
+            raise ValidationError(f"project node({project.node})和group node({node})不一致！")
+        if version:
+            if version.project != project:
+                raise ValidationError(f"version所输project{version.project}与group所输project({project})不一致！")
         return cleaned_data
-
-    def save(self, commit=True):
-        obj: models.SpiderGroup = super().save(commit=False)
-        obj.spiders = self.cleaned_data.get("spiders")
-        if commit:
-            obj.save()
-        return obj
 
 
 class ProjectVersionForm(forms.ModelForm):
@@ -209,9 +197,10 @@ class ProjectVersionForm(forms.ModelForm):
         super().__init__( *args, instance=instance, **kwargs)
         project: forms.ModelChoiceField = self.fields["project"] # type: ignore
         if instance is None:
-            self.fields["node"].initial = models.Node.default_node()
             try:
-                project.queryset = self.fields["node"].initial.projects.all()
+                default_node = models.Node.default_node()
+                self.fields["node"].initial = default_node
+                project.queryset = default_node.projects.filter(scrapyd_exists=True)
                 project.initial = project.queryset.first()
             except models.Node.DoesNotExist:
                 pass

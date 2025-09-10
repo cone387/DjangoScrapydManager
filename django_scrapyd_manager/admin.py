@@ -1,4 +1,6 @@
 # scrapyd_manager/admin.py
+from functools import wraps
+
 from django.contrib import admin, messages
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
@@ -21,6 +23,33 @@ admin_prefix = f"{admin_prefix}/admin"
 
 
 logger = logging.getLogger("django_scrapyd_manager")
+
+
+class ScrapydSyncAdminMixin:
+    """
+    通用 Mixin：给任何 ModelAdmin 自动加 scrapyd 同步
+    - 同步频率由 @django_ttl_cache 控制
+    """
+
+    def sync_with_scrapyd(self):
+        scrapyd_api.sync_nodes()
+
+    def _wrap_view(self, view):
+        @wraps(view)
+        def wrapper(request, *args, **kwargs):
+            try:
+                # 每次进入 admin 页面时都会触发
+                self.sync_with_scrapyd()
+            except Exception as e:
+                logger.error(f"[scrapyd sync error]: {e}")
+            return view(request, *args, **kwargs)
+        return wrapper
+
+    def get_urls(self):
+        urls = super().get_urls()
+        for url in urls:
+            url.callback = self._wrap_view(url.callback)  # 直接替换 view
+        return urls
 
 
 @receiver(post_delete, sender=models.Project)
@@ -138,8 +167,8 @@ class ProjectFilter(CustomFilter):
 
 
 @admin.register(models.Project)
-class ProjectAdmin(admin.ModelAdmin):
-    list_display = ("name", "latest_version", "related_versions", "sync_mode", "sync_status", "create_time")
+class ProjectAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
+    list_display = ("node", "name", "latest_version", "related_versions", "scrapyd_exists", "sync_mode", "sync_status", "create_time")
     readonly_fields = ("sync_status", "create_time", "update_time")
     list_filter = (ProjectNodeFilter, )
 
@@ -170,22 +199,19 @@ class ProjectAdmin(admin.ModelAdmin):
         return format_html(f'<a href="{href}">{obj.versions.count()}</a>')
     related_versions.short_description = "版本数量"
 
-    def get_object(self, request, object_id, from_field = ...):
-        return get_object_or_404(models.Project, pk=object_id)
-
-    def changelist_view(self, request, extra_context=None):
-
-        node_id = request.GET.get(ProjectNodeFilter.parameter_name)
-        if node_id:
-            node = get_object_or_404(models.Node, pk=node_id)
-        else:
-            node = models.Node.objects.order_by('name').first()
-        if node:
-            params = request.GET.copy()
-            params[ProjectNodeFilter.parameter_name] = str(node.id)
-            request.GET = params
-            scrapyd_api.sync_node_projects(node)
-        return super().changelist_view(request, extra_context)
+    # def changelist_view(self, request, extra_context=None):
+    #
+    #     node_id = request.GET.get(ProjectNodeFilter.parameter_name)
+    #     if node_id:
+    #         node = get_object_or_404(models.Node, pk=node_id)
+    #     else:
+    #         node = models.Node.objects.order_by('name').first()
+    #     if node:
+    #         params = request.GET.copy()
+    #         params[ProjectNodeFilter.parameter_name] = str(node.id)
+    #         request.GET = params
+    #         scrapyd_api.sync_node_projects(node)
+    #     return super().changelist_view(request, extra_context)
 
     def get_queryset(self, request):
         return super().get_queryset(request).select_related("node")
@@ -203,8 +229,8 @@ class VersionProjectFilter(ProjectFilter):
 
 
 @admin.register(models.ProjectVersion)
-class ProjectVersionAdmin(admin.ModelAdmin):
-    list_display = ("id", "linked_version", "project", "spider_count", "has_egg_file", "description", "sync_mode", "sync_status", "is_spider_synced", "create_time")
+class ProjectVersionAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
+    list_display = ("id", "linked_version", "project", "spider_count", "has_egg_file", "description", "scrapyd_exists", "sync_mode", "sync_status", "is_spider_synced", "create_time")
     readonly_fields = ("sync_status", "is_spider_synced", "create_time", "update_time")
     list_filter = (VersionNodeFilter, VersionProjectFilter)
     form = forms.ProjectVersionForm
@@ -228,7 +254,7 @@ class ProjectVersionAdmin(admin.ModelAdmin):
             version_datetime = datetime.fromtimestamp(int(obj.version))
         else:
             version_datetime = obj.version
-        href = f"{admin_prefix}/{admin_project_name}/{models.Spider._meta.model_name}/?version__version={obj.version}"
+        href = f"{admin_prefix}/{admin_project_name}/{models.Spider._meta.model_name}/?version_id={obj.id}"
         return format_html(f'<a href="{href}">{obj.version}({version_datetime})</a>')
     linked_version.admin_order_field = "version"
     linked_version.short_description = "版本"
@@ -241,22 +267,25 @@ class ProjectVersionAdmin(admin.ModelAdmin):
         return super().get_queryset(request).select_related("project", "project__node")
 
     def changelist_view(self, request, extra_context=None):
-        node_id = request.GET.get(VersionProjectFilter.node_filter.parameter_name)
-        project_name = request.GET.get(VersionProjectFilter.parameter_name)
-        if node_id:
-            node = get_object_or_404(models.Node, pk=node_id)
+        for k in request.GET:
+            if k not in [VersionProjectFilter.node_filter.parameter_name, VersionProjectFilter.parameter_name]:
+                break
         else:
-            node = models.Node.objects.order_by('name').first()
-        if node:
-            scrapyd_api.sync_node_projects(node)
-            if not project_name:
-                project = models.Project.objects.filter(node=node).order_by("name").first()
-                if project:
-                    project_name = project.name
-            q = request.GET.copy()
-            q[VersionProjectFilter.node_filter.parameter_name] = str(node.id)
-            q[VersionProjectFilter.parameter_name] = project_name
-            request.GET = q
+            node_id = request.GET.get(VersionProjectFilter.node_filter.parameter_name)
+            project_name = request.GET.get(VersionProjectFilter.parameter_name)
+            if node_id:
+                node = get_object_or_404(models.Node, pk=node_id)
+            else:
+                node = models.Node.objects.order_by('name').first()
+            if node:
+                if not project_name:
+                    project = models.Project.objects.filter(node=node).order_by("name").first()
+                    if project:
+                        project_name = project.name
+                q = request.GET.copy()
+                q[VersionProjectFilter.node_filter.parameter_name] = str(node.id)
+                q[VersionProjectFilter.parameter_name] = project_name
+                request.GET = q
         return super().changelist_view(request, extra_context)
 
     class Media:
@@ -276,7 +305,7 @@ class SpiderProjectFilter(ProjectFilter):
 
 class SpiderProjectVersionFilter(CustomFilter):
     title = "版本"
-    parameter_name = "version__version"
+    parameter_name = "version"
 
     def lookups(self, request, model_admin):
         node_id = request.GET.get(SpiderNodeFilter.parameter_name)
@@ -288,11 +317,38 @@ class SpiderProjectVersionFilter(CustomFilter):
             project__node_id=node_id,
             project__name=project_name,
         )
-        return [(v.version, v.short_path) for v in versions]
+        return [(v.id, v.short_path) for v in versions]
+
+
+@admin.register(models.SpiderRegistry)
+class SpiderRegistryAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
+    list_display = ("name", "formatted_kwargs", "formatted_settings", "create_time")
+    readonly_fields = ("name", "create_time", "update_time")
+
+    def formatted_kwargs(self, obj: models.SpiderRegistry):
+        args = []
+        for key, value in obj.kwargs.items():
+            args.append(f"{key} = {value}")
+        if len(args) == 5:
+            args.append("···")
+        return format_html('<span style="line-height: 1">%s</span>' % '<br>'.join(args))
+    formatted_kwargs.short_description = "参数(kwargs)"
+
+    def formatted_settings(self, obj: models.SpiderRegistry):
+        args = []
+        for key, value in obj.settings.items():
+            args.append(f"{key} = {value}")
+        if len(args) == 5:
+            args.append("···")
+        return format_html('<span style="line-height: 1">%s</span>' % '<br>'.join(args))
+    formatted_settings.short_description = "设置(setting)"
+
+    def has_delete_permission(self, request, obj: models.Spider = None):
+        return False
 
 
 @admin.register(models.Spider)
-class SpiderAdmin(admin.ModelAdmin):
+class SpiderAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
     list_display = ("name", "project_name", "project_node_name", "formatted_kwargs", "formatted_settings", "start_spider", "create_time")
     readonly_fields = ("version", "name", "create_time", "update_time")
     list_filter = (SpiderNodeFilter, SpiderProjectFilter, SpiderProjectVersionFilter)
@@ -354,56 +410,45 @@ class SpiderAdmin(admin.ModelAdmin):
     project_node_name.short_description = "节点名称"
 
     def get_queryset(self, request):
-        node_id = request.GET.get(SpiderNodeFilter.parameter_name)
-        project_name = request.GET.get(SpiderProjectFilter.parameter_name)
-        version = request.GET.get(SpiderProjectVersionFilter.parameter_name)
-        if node_id and project_name and version:
-            project_version = models.ProjectVersion.objects.filter(
-                project__node_id=node_id, project__name=project_name, version=version,
-            ).first()
-            if project_version:
-                scrapyd_api.sync_project_version_spiders(project_version)
-                return models.Spider.objects.filter(version=project_version).prefetch_related("version", "version__project", "version__project__node")
-            return models.Spider.objects.none()
         return super().get_queryset(request).prefetch_related("version", "version__project", "version__project__node")
 
-    def get_object(self, request, object_id, from_field = ...):
-        return get_object_or_404(models.Spider, pk=object_id)
-
     def changelist_view(self, request, extra_context=None):
-        if request.GET.get("id"):
-            return super().changelist_view(request, extra_context)
-        node_id = request.GET.get(SpiderNodeFilter.parameter_name)
-        project_name = request.GET.get(SpiderProjectFilter.parameter_name)
-        version = request.GET.get(SpiderProjectVersionFilter.parameter_name)
-        last_node_id = request.COOKIES.get("last_node_id")
-        last_project_name = request.COOKIES.get("last_project_name")
-        new_query = request.GET.copy()
-        if last_node_id and last_node_id != node_id:
-            new_query.pop(SpiderProjectFilter.parameter_name, None)
-            new_query.pop(SpiderProjectVersionFilter.parameter_name, None)
-            version = project_name = None
-        elif last_project_name and last_project_name != project_name:
-            new_query.pop(SpiderProjectVersionFilter.parameter_name, None)
-            version = None
-        if not node_id:
-            node_id = models.Node.objects.order_by('name').values_list("id", flat=True).first()
-        if node_id:
-            new_query[SpiderNodeFilter.parameter_name] = str(node_id)
-            if not project_name:
-                project = models.Node.default_project_of_node(node_id)
-                if project:
-                    project_name = project.name if project else None
-                    new_query[SpiderProjectFilter.parameter_name] = project_name
-                    if not version:
-                        version = project.latest_version
-                        if version:
-                            new_query[SpiderProjectVersionFilter.parameter_name] = version.version
-        request.GET = new_query
-        response = super().changelist_view(request, extra_context)
-        response.set_cookie("last_node_id", node_id)
-        response.set_cookie("last_project_name", project_name)
-        return response
+        for k in request.GET:
+            if k not in [SpiderNodeFilter.parameter_name, SpiderProjectFilter.parameter_name, SpiderProjectVersionFilter.parameter_name]:
+                break
+        else:
+            node_id = request.GET.get(SpiderNodeFilter.parameter_name)
+            project_name = request.GET.get(SpiderProjectFilter.parameter_name)
+            version = request.GET.get(SpiderProjectVersionFilter.parameter_name)
+            last_node_id = request.COOKIES.get("last_node_id")
+            last_project_name = request.COOKIES.get("last_project_name")
+            new_query = request.GET.copy()
+            if last_node_id and last_node_id != node_id:
+                new_query.pop(SpiderProjectFilter.parameter_name, None)
+                new_query.pop(SpiderProjectVersionFilter.parameter_name, None)
+                version = project_name = None
+            elif last_project_name and last_project_name != project_name:
+                new_query.pop(SpiderProjectVersionFilter.parameter_name, None)
+                version = None
+            if not node_id:
+                node_id = models.Node.objects.order_by('name').values_list("id", flat=True).first()
+            if node_id:
+                new_query[SpiderNodeFilter.parameter_name] = str(node_id)
+                if not project_name:
+                    project = models.Node.default_project_of_node(node_id)
+                    if project:
+                        project_name = project.name if project else None
+                        new_query[SpiderProjectFilter.parameter_name] = project_name
+                        if not version:
+                            version = project.latest_version
+                            if version:
+                                new_query[SpiderProjectVersionFilter.parameter_name] = version.version
+            request.GET = new_query
+            response = super().changelist_view(request, extra_context)
+            response.set_cookie("last_node_id", node_id)
+            response.set_cookie("last_project_name", project_name)
+            return response
+        return super().changelist_view(request, extra_context)
 
     def start_spider(self, obj: models.Spider):
         return format_html(
@@ -423,15 +468,14 @@ class SpiderAdmin(admin.ModelAdmin):
                 messages.success(request, f"成功启动爬虫 {spider.name} (job_id={job_id})")
             except Exception as e:
                 messages.error(request, f"启动爬虫 {spider.name} 失败: {str(e)}")
-
     start_spiders.short_description = "启动选中的爬虫"
 
 
 @admin.register(models.SpiderGroup)
-class SpiderGroupAdmin(admin.ModelAdmin):
+class SpiderGroupAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
     list_display = ("name", "node", "project", "related_spiders", "formatted_kwargs", "formatted_settings", "formatted_version", "start_spider_group", "create_time")
     readonly_fields = ("create_time", "update_time")
-    # filter_horizontal = ("nodes",)
+    filter_horizontal = ("spiders", )
     form = forms.SpiderGroupForm
     actions = ["start_group_spiders"]
     list_filter = ("node",)
@@ -439,7 +483,7 @@ class SpiderGroupAdmin(admin.ModelAdmin):
         "name",
         ("node", "project"),
         "version",
-        "spiders_select",
+        "spiders",
         "description",
         "kwargs",
         "settings",
@@ -546,14 +590,14 @@ class SpiderGroupAdmin(admin.ModelAdmin):
 
     @staticmethod
     def get_projects(request, node_id):
-        projects = models.Project.objects.filter(node_id=node_id)
+        projects = models.Project.objects.filter(node_id=node_id, scrapyd_exists=True)
         data = [{"id": p.id, "text": p.name} for p in projects]
         return JsonResponse(data, safe=False)
 
     @staticmethod
     def get_versions(request, project_id):
         if project_id:
-            versions = models.ProjectVersion.objects.filter(project_id=project_id).order_by("-create_time")
+            versions = models.ProjectVersion.objects.filter(project_id=project_id, scrapyd_exists=True).order_by("-create_time")
         else:
             node_id = request.GET.get("node_id")
             versions = models.ProjectVersion.objects.filter(project__node_id=node_id).order_by("-create_time")
@@ -595,82 +639,83 @@ class SpiderGroupAdmin(admin.ModelAdmin):
 
 
 class JobNodeFilter(ProjectNodeFilter):
-    parameter_name = "spider__version__project__node_id"
+    parameter_name = "node_id"
 
 
 class JobProjectFilter(ProjectFilter):
-    parameter_name = "spider__version__project__name"
+    parameter_name = "project__name"
     node_filter = JobNodeFilter
-
-
-class JobSpiderFilter(CustomFilter):
-    """右侧过滤：Spider（爬虫）"""
-    title = "爬虫"
-    parameter_name = "spider_id"
-
-    def lookups(self, request, model_admin):
-        node_id = request.GET.get(JobNodeFilter.parameter_name)
-        project_name = request.GET.get(JobProjectFilter.parameter_name)
-        if node_id and project_name:
-            spiders = models.Spider.objects.filter(project__node_id=node_id, project__name=project_name).order_by("name")
-            return [(str(s.id), s.name) for s in spiders]
-        return []
 
 
 class JobStatusFilter(CustomFilter):
     parameter_name = "status"
     title = "状态"
 
+    def value(self):
+        value = super().value()
+        if not value:
+            value = "running"
+        return value
+
     def lookups(self, request, model_admin):
         filters = [
-            (x, models.StatusChoice[x].label) for x in models.Job.objects.values_list("status", flat=True).distinct()
+            (x, models.JobStatus[x].label) for x in models.Job.objects.values_list("status", flat=True).distinct()
         ]
         filters.sort()
         return filters
 
 
 @admin.register(models.Job)
-class JobAdmin(admin.ModelAdmin):
+class JobAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
     list_display = (
-        "job_id", "job_project_version", "job_spider", "start_time", "end_time", "status", "pid", "stop_job",
+        "job_id", "job_spider", "job_project_version", "start_time", "end_time", "status", "pid", "job_sample_records", "job_info", "stop_job",
     )
     readonly_fields = ("create_time", "update_time", "start_time", "end_time", "pid", "log_url", "items_url", "spider", "status")
     list_filter = (JobStatusFilter, JobNodeFilter, JobProjectFilter)
-    actions = ["start_jobs", "stop_jobs"]
+    actions = ["stop_jobs"]
     ordering = ("-status", "-start_time")
 
-    def job_node(self, obj):
-        return obj.spider.version.project.node.name
-    job_node.admin_order_field = "spider__version__project__node__name"
+    def sync_with_scrapyd(self):
+        scrapyd_api.sync_nodes(with_jobs=True)
+
+    def job_node(self, obj: models.Job):
+        return obj.node.name
+    job_node.admin_order_field = "node_id"
     job_node.short_description = "节点名称"
 
-    def job_project(self, obj):
-        return obj.spider.version.project.name
-    job_project.admin_order_field = "spider__version__project__name"
+    def job_project(self, obj: models.Job):
+        return obj.project.name
+    job_project.admin_order_field = "project"
     job_project.short_description = "项目名称"
 
-    def job_project_version(self, obj):
-        return obj.spider.version.version
-    job_project_version.admin_order_field = "spider__version__version"
-    job_project_version.short_description = "项目版本"
+    def job_project_version(self, obj: models.Job):
+        return obj.resolved_version
+    job_project_version.admin_order_field = "project"
+    job_project_version.short_description = "版本(根据job时间匹配)"
 
-    def job_spider(self, obj):
+    def job_spider(self, obj: models.Job):
         return obj.spider.name
     job_spider.admin_order_field = "spider__name"
     job_spider.short_description = "爬虫名称"
 
-    def start_jobs(self, request, queryset):
-        """启动选中的 Job 对应的爬虫（重新运行）"""
-        if not queryset:
-            messages.error(request, "请选择要启动的任务")
-            return
-        for job in queryset:
-            try:
-                job_id = scrapyd_api.start_spider(job.spider)
-                messages.success(request, f"成功重新启动任务 {job.spider.name} (job_id={job_id})")
-            except Exception as e:
-                messages.error(request, f"重新启动任务 {job.spider.name} 失败: {str(e)}")
-    start_jobs.short_description = "重新启动选中的任务"
+    def job_sample_records(self, obj: models.Job):
+        href = f"{admin_prefix}/{admin_project_name}/{models.JobInfoLog._meta.model_name}/?job={obj.id}"
+        return format_html(f'<a class="button" href="{href}">采样记录({obj.logs.count()})</a>',)
+    job_sample_records.short_description = "日志记录"
+
+    def job_info(self, obj: models.Job):
+        href = f"{admin_prefix}/{admin_project_name}/{models.JobInfoLog._meta.model_name}/?job={obj.id}"
+        return format_html(f'<a class="button" href="{href}">Job最新状态</a>',)
+    job_info.short_description = "Job最新状态"
+
+    def get_list_display(self, request):
+        if request.method != "GET":
+            return self.list_display
+        if request.GET.get("status") != "finished":
+            list_display = list(self.list_display)
+            list_display.remove("end_time")
+            return list_display
+        return self.list_display
 
     def get_urls(self):
         urls = super().get_urls()
@@ -680,8 +725,23 @@ class JobAdmin(admin.ModelAdmin):
                 self.admin_site.admin_view(self.stop_job_view),
                 name="scrapy_job_stop",
             ),
+            path(
+                "<path:job_id>/info/",
+                self.admin_site.admin_view(self.sync_job_info_view),
+                name="scrapy_job_stop",
+            ),
         ]
         return custom_urls + urls
+
+    def sync_job_info_view(self, request, job_id):
+        job = get_object_or_404(models.Job, pk=job_id)
+        try:
+            info = scrapyd_api.get_job_info(job)
+            models.JobInfoLog.objects.create(job=job, info=info)
+            self.message_user(request, f"Job日志同步成功 {job.job_id} ({job.spider.name})", level=messages.SUCCESS)
+        except Exception as e:
+            self.message_user(request, f"Job日志同步失败: {e}", level=messages.ERROR)
+        return redirect(request.META.get("HTTP_REFERER", f"{admin_prefix}/{admin_project_name}/{models.Job._meta.model_name}/"))
 
     def stop_job_view(self, request, job_id):
         job = get_object_or_404(models.Job, pk=job_id)
@@ -715,13 +775,7 @@ class JobAdmin(admin.ModelAdmin):
     stop_jobs.short_description = "停止选中的爬虫任务"
 
     def get_queryset(self, request):
-        node_id = request.GET.get(JobNodeFilter.parameter_name)
-        if node_id:
-            node = get_object_or_404(models.Node, pk=node_id)
-        else:
-            return models.Job.objects.none()
-        scrapyd_api.sync_jobs(node)
-        return super().get_queryset(request).prefetch_related("spider", "spider__version", "spider__version__project", "spider__version__project__node")
+        return super().get_queryset(request).prefetch_related("spider", "node", "project")
 
     def get_object(self, request, object_id, from_field = ...):
         return get_object_or_404(models.Job, pk=object_id)
@@ -741,3 +795,65 @@ class JobAdmin(admin.ModelAdmin):
                     q[JobProjectFilter.parameter_name] = default_project.name
                 request.GET = q
         return super().changelist_view(request, extra_context)
+
+
+@admin.register(models.JobInfoLog)
+class JobInfoLogAdmin(admin.ModelAdmin):
+    list_display = (
+        "job", "job_node", "job_project",
+    )
+
+    list_filter = ("job__node", "job__project", "job__spider")
+    ordering = ("-job_id", "-create_time")
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_add_permission(self, request):
+        return False
+
+    def job_id(self, obj: models.JobInfoLog):
+        return obj.job.job_id
+    job_id.short_description = "JobId"
+
+    def job_node(self, obj: models.JobInfoLog):
+        return obj.job.node
+    job_node.admin_order_field = "node_id"
+    job_node.short_description = "节点名称"
+
+    def job_project(self, obj: models.JobInfoLog):
+        return obj.job.project
+    job_project.admin_order_field = "project"
+    job_project.short_description = "项目名称"
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).prefetch_related("job")
+
+# @admin.register(models.SpiderGuardian)
+# class SpiderGuardianAdmin(admin.ModelAdmin):
+#     list_display = (
+#         "job_id", "job_project_version", "job_spider", "start_time", "end_time", "status", "pid", "stop_job",
+#     )
+#     readonly_fields = ("create_time", "update_time", "start_time", "end_time", "pid", "log_url", "items_url", "spider", "status")
+#     list_filter = (JobStatusFilter, JobNodeFilter, JobProjectFilter)
+#     actions = ["start_jobs", "stop_jobs"]
+#     ordering = ("-status", "-start_time")
+#
+#     def job_node(self, obj):
+#         return obj.spider.version.project.node.name
+#     job_node.admin_order_field = "spider__version__project__node__name"
+#     job_node.short_description = "节点名称"
+#
+#     def get_queryset(self, request):
+#         return super().get_queryset(request).prefetch_related("spider", "version", "version", "node")
+#
+#
+# @admin.register(models.SpiderGuardianLog)
+# class SpiderGuardianLogAdmin(admin.ModelAdmin):
+#     list_display = (
+#         "guardian", "node", "spider", "action", "result", "create_time",
+#     )
+#     ordering = ("-create_time", )
+#
+#     def has_change_permission(self, request, obj = ...):
+#         return False
