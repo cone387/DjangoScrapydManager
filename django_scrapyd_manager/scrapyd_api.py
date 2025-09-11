@@ -6,6 +6,15 @@ from logging import getLogger
 from .cache import django_ttl_cache
 from . import models
 from django.db.models import Q
+from typing import Protocol, Iterable
+
+
+class SpiderGroupLike(Protocol):
+    name: str
+    kwargs: dict
+    settings: dict
+    resolved_spiders: Iterable[models.Spider]
+
 
 logger = getLogger(__name__)
 
@@ -101,14 +110,19 @@ def stop_jobs(jobs: List[models.Job]) -> List[models.Job]:
     return stopped_jobs
 
 
-def start_spider_group(group: models.SpiderGroup) -> List[models.Job]:
+def start_spider_group(group: SpiderGroupLike) -> List[models.Job]:
     """启动任务组里的所有爬虫"""
-    jobs = []
-    for spider in group.resolved_spiders:
-        job = start_spider(spider)
-        if job:
-            jobs.append(job)
-    return jobs
+    spiders = group.resolved_spiders
+    if not spiders:
+        raise ValueError("group下面没有爬虫")
+    job_ids = []
+    for spider in spiders:
+        spider.kwargs["__group__"] = group.name
+        spider.kwargs.update(group.kwargs)
+        spider.settings.update(group.settings)
+        job_id = start_spider(spider)
+        job_ids.append(job_id)
+    return job_ids
 
 
 def stop_spider_group(group: models.SpiderGroup) -> List[models.Job]:
@@ -188,13 +202,16 @@ def sync_node_projects(node: models.Node, include_version=True):
     resp = requests.get(url, auth=_auth_for_node(node), timeout=15)
     resp.raise_for_status()
     data = resp.json()
-    projects = data.get("projects", [])
-    for project_name in projects:
+    scrapyd_projects = data.get("projects", [])
+    projects = []
+    for project_name in scrapyd_projects:
         project, created = models.Project.objects.update_or_create(node=node, name=project_name, defaults={"sync_status": models.SyncStatus.SUCCESS, "scrapyd_exists": True})
+        projects.append(project)
         if include_version:
             sync_project_versions(project)
-    models.Project.objects.filter(~Q(name__in=projects), node=node, ).update(scrapyd_exists=False)
-    logger.info(f"sync {len(projects)} project for {node}")
+    models.Project.objects.filter(~Q(name__in=scrapyd_projects), node=node).update(scrapyd_exists=False)
+    logger.info(f"sync {len(scrapyd_projects)} project for {node}")
+    return projects
 
 
 def sync_project_version_spiders(version: models.ProjectVersion) -> bool:

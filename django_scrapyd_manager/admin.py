@@ -471,20 +471,12 @@ class SpiderGroupAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
             messages.error(request, "请选择要启动的爬虫组")
             return
         for group in queryset:
-            spiders = group.resolved_spiders
-            if not spiders:
-                messages.warning(request, f"爬虫组 {group.name} 内没有爬虫")
-                continue
-            for spider in spiders:
-                spider.kwargs["__group__"] = group.name
-                spider.kwargs.update(group.kwargs)
-                spider.settings.update(group.settings)
-                try:
-                    job_id = scrapyd_api.start_spider(spider)
-                    messages.success(request, f"组 {group.name} -> 启动爬虫 {spider.name} (job_id={job_id})")
-                except Exception as e:
-                    messages.error(request, f"组 {group.name} -> 启动爬虫 {spider.name} 失败: {str(e)}")
-                    break
+            try:
+                scrapyd_api.start_spider_group(group)
+                self.message_user(request, f"爬虫组{group.name} -> 启动成功", level=messages.SUCCESS)
+            except Exception as e:
+                self.message_user(request, f"爬虫组{group.name} -> 启动失败: {e}", level=messages.ERROR)
+                break
 
     start_group_spiders.short_description = "启动选中的爬虫组"
 
@@ -544,20 +536,12 @@ class SpiderGroupAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
 
     def start_group_view(self, request, group_id):
         group = get_object_or_404(models.SpiderGroup, pk=group_id)
-        spiders = group.resolved_spiders
-        if not spiders:
-            self.message_user(request, f"组 {group.name} 内没有爬虫", level=messages.WARNING)
-        for spider in spiders:
-            spider.kwargs["__group__"] = group.name
-            spider.kwargs.update(group.kwargs)
-            spider.settings.update(group.settings)
-            try:
-                job_id = scrapyd_api.start_spider(spider)
-                self.message_user(request, f"组 {group.name} -> 启动爬虫 {spider} (job_id={job_id})",
-                                  level=messages.SUCCESS)
-            except Exception as e:
-                self.message_user(request, f"组 {group.name} -> 启动爬虫 {spider.name} 失败: {e}",
-                                  level=messages.ERROR)
+        try:
+            scrapyd_api.start_spider_group(group)
+            self.message_user(request, f"爬虫组{group.name} -> 启动成功", level=messages.SUCCESS)
+        except Exception as e:
+            self.message_user(request, f"爬虫组{group.name} -> 启动失败: {e}",
+                              level=messages.ERROR)
         return redirect(request.META.get("HTTP_REFERER", f"{admin_prefix}/{admin_project_name}/{models.SpiderGroup._meta.model_name}/"))
 
     class Media:
@@ -740,21 +724,37 @@ class JobInfoLogAdmin(admin.ModelAdmin):
         return super().get_queryset(request).prefetch_related("job")
 
 
-@admin.register(models.SpiderGuardian)
-class SpiderGuardianAdmin(admin.ModelAdmin):
+@admin.register(models.GuardianLock)
+class GuardianLockAdmin(admin.ModelAdmin):
     list_display = (
-        "spider_group", "strategy", "description", "enable", "last_action", "interval", "last_check", "create_time",
+        "id", "name", "echo", "guard_interval", "heartbeat", "locked_at", "create_time",
     )
-    readonly_fields = ("create_time", "update_time")
+
+    def has_change_permission(self, request, obj = ...):
+        return False
+
+
+@admin.register(models.Guardian)
+class GuardianAdmin(admin.ModelAdmin):
+    list_display = (
+        "id", "spider_group", "strategy", "description", "enable", "last_action", "interval", "last_check", "create_time",
+    )
+    readonly_fields = ("last_action", "create_time", "update_time")
+    fields = (
+        ("spider_group", "strategy", "enable",),
+        ("last_check", "last_action"),
+        "interval",
+        "create_time"
+    )
 
     def get_queryset(self, request):
         return super().get_queryset(request).prefetch_related("spider_group", "spider_group__spiders")
 
 
-@admin.register(models.SpiderGuardianLog)
-class SpiderGuardianLogAdmin(admin.ModelAdmin):
+@admin.register(models.GuardianLog)
+class GuardianLogAdmin(admin.ModelAdmin):
     list_display = (
-        "guardian", "node", "spider", "action", "result", "create_time",
+        "id", "guardian", "node", "spider_name", "action", "reason", "success", "create_time",
     )
     ordering = ("-create_time", )
 
