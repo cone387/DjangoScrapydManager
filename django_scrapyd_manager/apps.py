@@ -7,6 +7,7 @@ import sys
 class DjangoScrapydManagerConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
     name = 'django_scrapyd_manager'
+    verbose_name = "Scrapyd管理"
     _guardian_thread_started = False
 
     def ready(self):
