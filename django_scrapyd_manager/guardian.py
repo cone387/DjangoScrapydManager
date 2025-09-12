@@ -13,6 +13,10 @@ logger = logging.getLogger(__name__)
 LOCK_EXPIRE = 30
 
 
+class InvalidVersionError(Exception):
+    pass
+
+
 def node_has_project(node: models.Node, project: models.Project) -> bool:
     scrapyd_projects = scrapyd_api.sync_node_projects(node, include_version=False)
     for scrapyd_project in scrapyd_projects:
@@ -94,6 +98,21 @@ def release_guardian_lock(name="default"):
     models.GuardianLock.objects.filter(name=name).delete()
 
 
+def get_group_publishable_version(spider_group: models.SpiderGroup) -> models.ProjectVersion:
+    version = spider_group.version
+    if version is not None:
+        if version.egg_file:
+            return version
+        else:
+            raise InvalidVersionError(f"{spider_group.project}/{version.version}没有egg文件")
+    version = spider_group.project.versions.filter(
+        egg_file__isnull=False,
+    ).order_by("-create_time", "-version").first()
+    if version is None:
+        raise InvalidVersionError(f"项目({spider_group.project})没有可用的带egg版本")
+    return version
+
+
 def guard_object(spider_guardian: models.Guardian):
     node = spider_guardian.spider_group.node
     guard_spiders = spider_guardian.spider_group.resolved_spiders
@@ -109,11 +128,17 @@ def guard_object(spider_guardian: models.Guardian):
                 reason=f"node({node})上没有该项目:{spider_guardian.spider_group.project}"
             )
             try:
-                deploy_project_version(spider_guardian.spider_group.resolved_version)
-            except Exception as e:
+                version = get_group_publishable_version(spider_guardian.spider_group)
+            except InvalidVersionError as e:
                 log.success = False
-                log.message = traceback.format_exc()
-                logger.exception(e)
+                log.message = str(e)
+            else:
+                try:
+                    deploy_project_version(version)
+                except Exception as e:
+                    log.success = False
+                    log.message = traceback.format_exc()
+                    logger.exception(e)
             log.save()
             logs.append(log)
         for spider in missing_spiders:
