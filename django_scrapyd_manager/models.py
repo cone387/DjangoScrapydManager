@@ -1,9 +1,9 @@
 # scrapyd_manager/models.py
 from __future__ import annotations
-
+from datetime import datetime
 from django.core.validators import RegexValidator
 from django.db import models
-from django.utils.timezone import datetime
+from django.utils import timezone
 from .utils import get_md5
 import json
 
@@ -17,7 +17,7 @@ class Node(models.Model):
     auth = models.BooleanField(default=False, verbose_name="是否需要认证")
     username = models.CharField(max_length=255, blank=True, null=True)
     password = models.CharField(max_length=255, blank=True, null=True)
-    create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
+    create_time = models.DateTimeField(default=timezone.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
     @classmethod
@@ -75,7 +75,7 @@ class Project(models.Model):
     sync_mode = models.CharField(max_length=10, default=SyncMode.AUTO, choices=SyncMode.choices, verbose_name="同步模式")
     scrapyd_exists = models.BooleanField(default=False, verbose_name="在Scrapyd中存在")
     sync_status = models.CharField(max_length=10, default=SyncStatus.PENDING, choices=SyncStatus.choices, verbose_name="同步状态")
-    create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
+    create_time = models.DateTimeField(default=timezone.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
     @property
@@ -100,13 +100,13 @@ class ProjectVersion(models.Model):
     sync_mode = models.CharField(max_length=10, choices=SyncMode.choices, default=SyncMode.AUTO, verbose_name="同步模式")
     scrapyd_exists = models.BooleanField(default=False, verbose_name="在Scrapyd中存在")
     sync_status = models.CharField(max_length=10, default=SyncStatus.PENDING, choices=SyncStatus.choices, verbose_name="同步状态")
-    create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
+    create_time = models.DateTimeField(default=timezone.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
     @property
     def pretty(self):
         if self.version.isdigit():
-            v = datetime.fromtimestamp(int(self.version))
+            v = timezone.make_aware(datetime.fromtimestamp(int(self.version)))
         else:
             v = self.version
         return v
@@ -134,7 +134,7 @@ class SpiderRegistry(models.Model):
     description = models.CharField(max_length=200, null=True, blank=True, verbose_name="描述")
     kwargs = models.JSONField(default=dict, null=True, blank=True, verbose_name="Scrapy自定义参数(对组内所有爬虫生效)")
     settings = models.JSONField(default=dict, null=True, blank=True, verbose_name="Scrapy自定义设置(对组内所有爬虫生效)")
-    create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
+    create_time = models.DateTimeField(default=timezone.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
     class Meta:
@@ -152,7 +152,7 @@ class Spider(models.Model):
     name = models.CharField(max_length=255, verbose_name="爬虫名称")
     kwargs = models.JSONField(default=dict, null=True, blank=True, verbose_name="Scrapy自定义参数(对组内所有爬虫生效)")
     settings = models.JSONField(default=dict, null=True, blank=True, verbose_name="Scrapy自定义设置(对组内所有爬虫生效)")
-    create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
+    create_time = models.DateTimeField(default=timezone.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
     @property
@@ -173,7 +173,7 @@ class Spider(models.Model):
     @property
     def job_id(self):
         group_code = self.kwargs.get("__group__") or "server"
-        return f"{group_code}:{self.fp}:{self.version.version}:{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        return f"{group_code}:{self.fp}:{self.version.version}:{timezone.now().strftime('%Y%m%d_%H%M%S')}"
 
     def __str__(self):
         return self.name
@@ -189,7 +189,7 @@ class SpiderGroup(models.Model):
     name = models.CharField(max_length=255, verbose_name="任务组名称", unique=True)
     code = models.CharField(max_length=100, null=True, blank=True, verbose_name="代号", validators=[
             RegexValidator(
-                regex=r'^[a-zA-Z]*$',
+                regex=r'^[a-zA-Z_-]*$',
                 message='代号只能包含英文字母',
                 code='invalid_code'
             )
@@ -201,7 +201,7 @@ class SpiderGroup(models.Model):
     kwargs = models.JSONField(default=dict, null=True, blank=True, verbose_name="Scrapy自定义参数kwargs(对组内所有爬虫生效)")
     settings = models.JSONField(default=dict, null=True, blank=True, verbose_name="Scrapy自定义设置settings(对组内所有爬虫生效)")
     description = models.CharField(max_length=200, blank=True, null=True, verbose_name="任务组描述")
-    create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
+    create_time = models.DateTimeField(default=timezone.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
     @property
@@ -245,7 +245,7 @@ class Job(models.Model):
     items_url = models.CharField(max_length=255, null=True, blank=True)
     status = models.CharField(max_length=20, verbose_name="状态", choices=JobStatus.choices)
     pid = models.IntegerField(null=True, blank=True, verbose_name="进程ID")
-    create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
+    create_time = models.DateTimeField(default=timezone.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
     def gen_md5(self):
@@ -283,7 +283,7 @@ class Job(models.Model):
 class JobInfoLog(models.Model):
     job = models.ForeignKey(Job, on_delete=models.DO_NOTHING, verbose_name="Job", db_constraint=False, related_name="logs")
     info = models.JSONField(null=True, blank=True, verbose_name="详情")
-    create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
+    create_time = models.DateTimeField(default=timezone.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
     class Meta:
@@ -305,9 +305,9 @@ class GuardianLock(models.Model):
     name = models.CharField(max_length=50, unique=True, default="default", verbose_name="锁名字")
     echo = models.IntegerField(default=0, verbose_name="运行轮次")
     guard_interval = models.IntegerField(default=60, verbose_name="监控周期(秒)")
-    locked_at = models.DateTimeField(default=datetime.now, verbose_name="锁创建时间")
-    heartbeat = models.DateTimeField(default=datetime.now, verbose_name="上一次心跳")
-    create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
+    locked_at = models.DateTimeField(default=timezone.now, verbose_name="锁创建时间")
+    heartbeat = models.DateTimeField(default=timezone.now, verbose_name="上一次心跳")
+    create_time = models.DateTimeField(default=timezone.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
     class Meta:
@@ -323,7 +323,7 @@ class Guardian(models.Model):
     interval = models.IntegerField(default=60, verbose_name="检测间隔(秒), 修改后重启生效")
     last_check = models.DateTimeField(null=True, blank=True, verbose_name="上次检测时间")
     last_action = models.CharField(max_length=255, null=True, blank=True, verbose_name="上次操作说明")
-    create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
+    create_time = models.DateTimeField(default=timezone.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
     class Meta:
@@ -349,7 +349,7 @@ class GuardianLog(models.Model):
     reason = models.CharField(max_length=200, null=True, blank=True, verbose_name="原因")
     success = models.BooleanField(default=True, verbose_name="成功")
     message = models.TextField(null=True, blank=True, verbose_name="详细日志")
-    create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
+    create_time = models.DateTimeField(default=timezone.now, verbose_name="创建时间")
 
     class Meta:
         db_table = "scrapy_guardian_log"

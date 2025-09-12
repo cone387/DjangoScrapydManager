@@ -1,12 +1,13 @@
 # scrapyd_manager/scrapyd_api.py
 import requests
-from datetime import datetime
+from django.utils import timezone
 from typing import List
 from logging import getLogger
 from .cache import django_ttl_cache
 from . import models
 from django.db.models import Q
 from typing import Protocol, Iterable
+from datetime import datetime
 
 
 class SpiderGroupLike(Protocol):
@@ -93,8 +94,8 @@ def stop_job(job: models.Job) -> models.Job | None:
     resp.raise_for_status()
     result = resp.json()
     if result.get("status") == "ok":
-        job.status = models.JobStatus.finished
-        job.end_time = models.datetime.now()
+        job.status = models.JobStatus.FINISHED
+        job.end_time = timezone.now()
         job.save(update_fields=["status", "end_time", "update_time"])
         return job
     return None
@@ -159,14 +160,21 @@ def sync_jobs(node: models.Node) -> List[models.Job]:
                 continue
             for entry in entries:
                 spider_name = entry["spider"]
-                start_time = entry.get("start_time", datetime.now())
+                start_time = entry.get("start_time")
+                if start_time:
+                    start_time = timezone.make_aware(datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S.%f"))
+                else:
+                    start_time = timezone.now()
+                end_time = entry.get("end_time")
+                if end_time:
+                    end_time = timezone.make_aware(datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S.%f"))
                 job = models.Job(
                     node=node,
                     project=project,
                     spider=models.SpiderRegistry.objects.get(name=spider_name),
                     start_time=start_time,
                     job_id=entry["id"],
-                    end_time=entry.get("end_time"),
+                    end_time=end_time,
                     items_url=entry.get("items_url"),
                     log_url=entry.get("log_url"),
                     pid=entry.get("pid"),
@@ -190,8 +198,11 @@ def sync_project_versions(project: models.Project):
     project_versions = []
     for version in versions:
         project_versions.append(models.ProjectVersion(project=project, version=version, sync_status=models.SyncStatus.SUCCESS, scrapyd_exists=True))
-    models.ProjectVersion.objects.bulk_create(
-        project_versions, update_conflicts=True, unique_fields=("project", "version"), update_fields=["sync_status", "scrapyd_exists"])
+    # models.ProjectVersion.objects.bulk_create(
+    #     project_versions, update_conflicts=True, unique_fields=("project", "version"), update_fields=["sync_status", "scrapyd_exists"])
+    # mysql不支持update_conflicts=True, 所以这里先插入, 再筛选更新
+    models.ProjectVersion.objects.bulk_create(project_versions, ignore_conflicts=True)
+    models.ProjectVersion.objects.filter(project=project, version__in=versions).update(sync_status=models.SyncStatus.SUCCESS, scrapyd_exists=True)
     models.ProjectVersion.objects.filter(~Q(version__in=versions), project=project).update(scrapyd_exists=False)
     logger.info(f"sync {len(project_versions)} versions for {project}")
 

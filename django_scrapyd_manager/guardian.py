@@ -75,13 +75,14 @@ def acquire_guardian_lock(name="default") -> models.GuardianLock | None:
             return models.GuardianLock.objects.create(name=name, locked_at=now, heartbeat=now)
     except IntegrityError:
         # 已经有锁，看看是否超时
-        lock = models.GuardianLock.objects.select_for_update().get(name=name)
-        if lock.heartbeat < expire_time:
-            # 锁过期 → 抢占
-            lock.locked_at = now
-            lock.heartbeat = now
-            lock.save(update_fields=["locked_at", "heartbeat"])
-            return lock
+        with transaction.atomic():
+            lock = models.GuardianLock.objects.select_for_update().get(name=name)
+            if lock.heartbeat < expire_time:
+                # 锁过期 → 抢占
+                lock.locked_at = now
+                lock.heartbeat = now
+                lock.save(update_fields=["locked_at", "heartbeat"])
+                return lock
         return None
 
 
