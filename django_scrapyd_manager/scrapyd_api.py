@@ -1,6 +1,6 @@
 # scrapyd_manager/scrapyd_api.py
 import requests
-import time
+from datetime import datetime
 from typing import List
 from logging import getLogger
 from .cache import django_ttl_cache
@@ -11,6 +11,7 @@ from typing import Protocol, Iterable
 
 class SpiderGroupLike(Protocol):
     name: str
+    code: str | None
     kwargs: dict
     settings: dict
     resolved_spiders: Iterable[models.Spider]
@@ -33,17 +34,16 @@ def _auth_for_node(node: models.Node):
 def start_spider(spider: models.Spider) -> str:
     """启动爬虫并返回 Job"""
     url = f"{spider.version.project.node.url}/schedule.json"
-    group = spider.kwargs.pop("__group__", "server")
-    for k, v in list(spider.kwargs.items()):
+    kwargs = spider.kwargs.copy()
+    for k, v in list(kwargs.items()):
         if k.startswith("__"):
-            spider.kwargs.pop(k)
-    job_id = spider.kwargs.get("job_id") or spider.id
-    spider.kwargs["jobid"] = f"{group}:{spider.version.version}:{int(time.time())}:{job_id}"
+            kwargs.pop(k)
     data = {
         "project": spider.version.project.name,
         "spider": spider.name,
         "setting": [f"{k}={v}" for k, v in spider.settings.items()],
-        **spider.kwargs,
+        "jobid": spider.job_id,
+        **kwargs,
     }
     resp = requests.post(url, data=data, auth=_auth_for_node(spider.version.project.node), timeout=15)
     resp.raise_for_status()
@@ -117,7 +117,7 @@ def start_spider_group(group: SpiderGroupLike) -> List[models.Job]:
         raise ValueError("group下面没有爬虫")
     job_ids = []
     for spider in spiders:
-        spider.kwargs["__group__"] = group.name
+        spider.kwargs["__group__"] = group.code
         spider.kwargs.update(group.kwargs)
         spider.settings.update(group.settings)
         job_id = start_spider(spider)
@@ -149,6 +149,7 @@ def sync_jobs(node: models.Node) -> List[models.Job]:
     """列出节点上的所有任务并同步到数据库"""
     url = f"{node.url}/listjobs.json"
     jobs = []
+    models.Job.objects.filter(node=node, status=models.JobStatus.PENDING).delete()
     for project in node.projects.all():
         resp = requests.get(url, params={"project": project.name}, auth=_auth_for_node(node), timeout=15)
         resp.raise_for_status()
@@ -158,7 +159,7 @@ def sync_jobs(node: models.Node) -> List[models.Job]:
                 continue
             for entry in entries:
                 spider_name = entry["spider"]
-                start_time = entry["start_time"]
+                start_time = entry.get("start_time", datetime.now())
                 job = models.Job(
                     node=node,
                     project=project,

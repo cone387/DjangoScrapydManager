@@ -399,14 +399,14 @@ class SpiderAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
 
 @admin.register(models.SpiderGroup)
 class SpiderGroupAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
-    list_display = ("name", "node", "project", "related_spiders", "formatted_kwargs", "formatted_settings", "formatted_version", "start_spider_group", "create_time")
+    list_display = ("name", "code", "node", "project", "related_spiders", "formatted_kwargs", "formatted_settings", "formatted_version", "start_spider_group", "create_time")
     readonly_fields = ("create_time", "update_time")
     filter_horizontal = ("spiders", )
     form = forms.SpiderGroupForm
     actions = ["start_group_spiders"]
     list_filter = ("node",)
     fields = (
-        "name",
+        ("name", "code"),
         ("node", "project"),
         "version",
         "spiders",
@@ -564,12 +564,12 @@ class JobStatusFilter(CustomFilter):
     def value(self):
         value = super().value()
         if not value:
-            value = "running"
+            value = models.JobStatus.RUNNING
         return value
 
     def lookups(self, request, model_admin):
         filters = [
-            (x, models.JobStatus[x].label) for x in models.Job.objects.values_list("status", flat=True).distinct()
+            (x, models.JobStatus[x.upper()].label) for x in models.Job.objects.values_list("status", flat=True).distinct()
         ]
         filters.sort()
         return filters
@@ -584,6 +584,12 @@ class JobAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
     list_filter = (JobStatusFilter, JobNodeFilter, JobProjectFilter)
     actions = ["stop_jobs"]
     ordering = ("-status", "-start_time")
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_add_permission(self, request):
+        return False
 
     def sync_with_scrapyd(self):
         scrapyd_api.sync_nodes(with_jobs=True)
@@ -663,7 +669,7 @@ class JobAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
         return redirect(request.META.get("HTTP_REFERER", f"{admin_prefix}/{admin_project_name}/{models.Job._meta.model_name}/"))
 
     def stop_job(self, obj: models.Job):
-        if obj.status == "running":  # 可选: 只在运行中显示按钮
+        if obj.status == models.JobStatus.RUNNING:  # 可选: 只在运行中显示按钮
             return format_html(
                 '<a class="button" href="{}">停止</a>',
                 f"{admin_prefix}/{admin_project_name}/{models.Job._meta.model_name}/{obj.id}/stop/"
@@ -730,8 +736,9 @@ class GuardianLockAdmin(admin.ModelAdmin):
         "id", "name", "echo", "guard_interval", "heartbeat", "locked_at", "create_time",
     )
 
-    def has_change_permission(self, request, obj = ...):
-        return False
+    readonly_fields = (
+        "name", "echo", "heartbeat", "locked_at", "create_time",
+    )
 
 
 @admin.register(models.Guardian)
@@ -739,6 +746,7 @@ class GuardianAdmin(admin.ModelAdmin):
     list_display = (
         "id", "spider_group", "strategy", "description", "enable", "last_action", "interval", "last_check", "create_time",
     )
+    list_editable = ("enable",)
     readonly_fields = ("last_action", "create_time", "update_time")
     fields = (
         ("spider_group", "strategy", "enable",),

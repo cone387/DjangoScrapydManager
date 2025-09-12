@@ -1,10 +1,5 @@
-# import django
-# import os
-# os.environ.setdefault("DJANGO_SETTINGS_MODULE", "")
-# django.setup()
 import traceback
 import time
-from django.db.models import QuerySet
 from typing import Iterable
 from django_scrapyd_manager import models, scrapyd_api
 from django.utils import timezone
@@ -30,19 +25,20 @@ def deploy_project_version(project_version: models.ProjectVersion):
     scrapyd_api.add_version(project_version)
 
 
-def all_spiders_running_on_node(spiders: QuerySet[models.SpiderRegistry], node: models.Node):
-    pass
-
-
-def missing_spider_jobs_on_node(required_spiders: Iterable[models.SpiderRegistry], node: models.Node) -> Iterable[models.SpiderRegistry]:
+def missing_spiders_jobs_on_node(required_spiders: Iterable[models.Spider], node: models.Node) -> Iterable[models.Spider]:
     node_jobs = scrapyd_api.sync_jobs(node)
-    job_spiders = []
+    job_ids = []
     missing_spiders = []
     for job in node_jobs:
-        if job.status != models.JobStatus.finished:
-            job_spiders.append(job.spider)
+        if job.status != models.JobStatus.FINISHED:
+            job_ids.append(job.job_id)
+
     for required_spider in required_spiders:
-        if required_spider not in job_spiders:
+        spider_fp = required_spider.fp
+        for job_id in job_ids:
+            if spider_fp in job_id:
+                break
+        else:
             missing_spiders.append(required_spider)
     return missing_spiders
 
@@ -65,6 +61,7 @@ class GuardSpiderGroup:
     def __init__(self, group: models.SpiderGroup, missing_spiders: Iterable[models.Spider]):
         self.resolved_spiders = missing_spiders
         self.name = group.name
+        self.code = group.code
         self.kwargs = group.kwargs
         self.settings = group.settings
 
@@ -98,11 +95,10 @@ def release_guardian_lock(name="default"):
 
 def guard_object(spider_guardian: models.Guardian):
     node = spider_guardian.spider_group.node
-    guard_spider_registries = spider_guardian.spider_group.spiders.all()
-    missing_registry_spiders = missing_spider_jobs_on_node(guard_spider_registries, node)
+    guard_spiders = spider_guardian.spider_group.resolved_spiders
+    missing_spiders = missing_spiders_jobs_on_node(guard_spiders, node)
     logs = []
-    if missing_registry_spiders:
-        missing_spiders = resolve_spiders_from_registries(missing_registry_spiders, spider_guardian.spider_group)
+    if missing_spiders:
         if not node_has_project(node, spider_guardian.spider_group.project):
             log = models.GuardianLog(
                 guardian=spider_guardian,
@@ -128,7 +124,7 @@ def guard_object(spider_guardian: models.Guardian):
                 spider_name=spider.name,
                 group=spider_guardian.spider_group,
                 action=models.GuardianAction.START_SPIDER,
-                reason=f"node{node}上没有{spider_guardian.spider_group.project}的爬虫{spider.name}"
+                reason=f"{node}/{spider_guardian.spider_group.project}/{spider_guardian.spider_group.name}的爬虫{spider.name}没有运行"
             )
             try:
                 guard_spider_group = GuardSpiderGroup(group=spider_guardian.spider_group, missing_spiders=[spider])

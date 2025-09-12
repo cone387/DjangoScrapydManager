@@ -1,8 +1,11 @@
 # scrapyd_manager/models.py
 from __future__ import annotations
+
+from django.core.validators import RegexValidator
 from django.db import models
 from django.utils.timezone import datetime
 from .utils import get_md5
+import json
 
 
 class Node(models.Model):
@@ -152,6 +155,26 @@ class Spider(models.Model):
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
+    @property
+    def fp(self):
+        kwargs = self.kwargs.copy()
+        for k, v in list(kwargs.items()):
+            if k.startswith("__"):
+                kwargs.pop(k)
+        obj = {
+            "version": self.version.version,
+            "name": self.name,
+            "kwargs": kwargs,
+            "settings": self.settings,
+        }
+        s = json.dumps(obj, separators=(',', ':'), sort_keys=True)
+        return get_md5(s)[:12]
+
+    @property
+    def job_id(self):
+        group_code = self.kwargs.get("__group__") or "server"
+        return f"{group_code}:{self.fp}:{self.version.version}:{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
     def __str__(self):
         return self.name
 
@@ -164,6 +187,13 @@ class Spider(models.Model):
 
 class SpiderGroup(models.Model):
     name = models.CharField(max_length=255, verbose_name="任务组名称", unique=True)
+    code = models.CharField(max_length=100, null=True, blank=True, verbose_name="代号", validators=[
+            RegexValidator(
+                regex=r'^[a-zA-Z]*$',
+                message='代号只能包含英文字母',
+                code='invalid_code'
+            )
+        ])
     node = models.ForeignKey(Node, db_constraint=False, on_delete=models.DO_NOTHING, verbose_name="节点")
     project = models.ForeignKey(Project, db_constraint=False, verbose_name='项目', on_delete=models.CASCADE)
     version = models.ForeignKey(ProjectVersion, verbose_name='版本', null=True, blank=True, on_delete=models.CASCADE)
@@ -197,9 +227,9 @@ class SpiderGroup(models.Model):
 
 
 class JobStatus(models.TextChoices):
-    running = "running", "运行中"
-    finished = "finished", "已结束"
-    pending = "pending", "启动中"
+    RUNNING = "running", "运行中"
+    FINISHED = "finished", "已结束"
+    PENDING = "pending", "启动中"
 
 
 class Job(models.Model):
@@ -274,7 +304,7 @@ class GuardianLock(models.Model):
     """
     name = models.CharField(max_length=50, unique=True, default="default", verbose_name="锁名字")
     echo = models.IntegerField(default=0, verbose_name="运行轮次")
-    guard_interval = models.IntegerField(default=10, verbose_name="监控周期(秒)")
+    guard_interval = models.IntegerField(default=60, verbose_name="监控周期(秒)")
     locked_at = models.DateTimeField(default=datetime.now, verbose_name="锁创建时间")
     heartbeat = models.DateTimeField(default=datetime.now, verbose_name="上一次心跳")
     create_time = models.DateTimeField(default=datetime.now, verbose_name="创建时间")
