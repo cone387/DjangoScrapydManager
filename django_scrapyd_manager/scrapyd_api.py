@@ -123,9 +123,6 @@ def start_spider_group(group: SpiderGroupLike) -> List[models.Job]:
         raise ValueError("group下面没有爬虫")
     job_ids = []
     for spider in spiders:
-        spider.kwargs["__group__"] = group.code
-        spider.kwargs.update(group.kwargs)
-        spider.settings.update(group.settings)
         job_id = start_spider(spider)
         job_ids.append(job_id)
     return job_ids

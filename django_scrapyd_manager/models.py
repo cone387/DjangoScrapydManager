@@ -212,11 +212,16 @@ class SpiderGroup(models.Model):
     def resolved_spiders(self):
         version = self.resolved_version
         registry_names = self.spiders.values_list("name", flat=True)
-        return Spider.objects.filter(
+        spiders = Spider.objects.filter(
             version=version,
             version__project=self.project,
             name__in=registry_names
         )
+        for spider in spiders:
+            spider.kwargs["__group__"] = self.code
+            spider.kwargs.update(self.kwargs)
+            spider.settings.update(self.settings)
+        return spiders
 
     class Meta:
         db_table = "scrapy_spider_group"
