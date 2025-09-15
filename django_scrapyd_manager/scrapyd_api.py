@@ -8,6 +8,7 @@ from . import models
 from django.db.models import Q
 from typing import Protocol, Iterable
 from datetime import datetime
+from django.conf import settings
 
 
 class SpiderGroupLike(Protocol):
@@ -22,6 +23,10 @@ logger = getLogger(__name__)
 
 
 class ScrapydResponseError(Exception):
+    pass
+
+
+class NodesSyncError(Exception):
     pass
 
 
@@ -161,12 +166,12 @@ def sync_jobs(node: models.Node) -> List[models.Job]:
             for entry in entries:
                 spider_name = entry["spider"]
                 start_time = entry.get("start_time")
-                if start_time:
+                if start_time and settings.USE_TZ:
                     start_time = timezone.make_aware(datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S.%f"))
                 else:
                     start_time = timezone.now()
                 end_time = entry.get("end_time")
-                if end_time:
+                if end_time and settings.USE_TZ:
                     end_time = timezone.make_aware(datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S.%f"))
                 job = models.Job(
                     node=node,
@@ -211,7 +216,7 @@ def sync_project_versions(project: models.Project):
 def sync_node_projects(node: models.Node, include_version=True):
     """列出某个节点上的项目，支持是否展开版本"""
     url = f"{node.url}/listprojects.json"
-    resp = requests.get(url, auth=_auth_for_node(node), timeout=15)
+    resp = requests.get(url, auth=_auth_for_node(node), timeout=5)
     resp.raise_for_status()
     data = resp.json()
     scrapyd_projects = data.get("projects", [])
@@ -233,7 +238,7 @@ def sync_project_version_spiders(version: models.ProjectVersion) -> bool:
         resp = requests.get(url, params={
             "project": version.project.name,
             "_version": version.version,
-        }, auth=_auth_for_node(version.project.node), timeout=15)
+        }, auth=_auth_for_node(version.project.node), timeout=5)
         resp.raise_for_status()
         data = resp.json()
         spiders = data.get("spiders", [])
@@ -256,7 +261,7 @@ def add_version(version: models.ProjectVersion):
         raise Exception("egg_file is not set")
     files = {"egg": version.egg_file.open()}
     data = {"project": version.project.name, "version": version.version}
-    resp = requests.post(url, data=data, files=files, auth=_auth_for_node(version.project.node), timeout=60)
+    resp = requests.post(url, data=data, files=files, auth=_auth_for_node(version.project.node), timeout=15)
     resp.raise_for_status()
     return resp.json()
 
@@ -283,10 +288,10 @@ def delete_project(project: models.Project):
         raise ScrapydResponseError(ret["message"])
 
 
-def daemon_status(node: models.Node) -> dict:
+def daemon_status(node: models.Node, timeout=3) -> dict:
     """获取节点的 daemon 状态"""
     url = f"{node.url}/daemonstatus.json"
-    resp = requests.get(url, auth=_auth_for_node(node), timeout=15)
+    resp = requests.get(url, auth=_auth_for_node(node), timeout=timeout)
     resp.raise_for_status()
     return resp.json()
 
@@ -294,16 +299,25 @@ def daemon_status(node: models.Node) -> dict:
 @django_ttl_cache()
 def sync_nodes(with_jobs=False):
     nodes = models.Node.objects.all()
+    available_nodes = []
+    error_nodes = []
     for node in nodes:
-        sync_node_projects(node, include_version=True)
-
-    for version in models.ProjectVersion.objects.filter(scrapyd_exists=True, project__scrapyd_exists=True):
+        try:
+            sync_node_projects(node, include_version=True)
+            available_nodes.append(node)
+        except Exception as e:
+            logger.error(f"同步节点 {node} 失败: {e}")
+            error_nodes.append(node)
+    for version in models.ProjectVersion.objects.filter(project__node__in=available_nodes, scrapyd_exists=True, project__scrapyd_exists=True):
         sync_project_version_spiders(version)
 
     if with_jobs:
-        for node in nodes:
+        for node in available_nodes:
             sync_jobs(node)
 
+    if error_nodes:
+        return f"节点{[node.name for node in available_nodes]}同步成功, 节点{[node.name for node in error_nodes]}同步失败"
+    return ""
 
 
 

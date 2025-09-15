@@ -45,16 +45,20 @@ class ScrapydSyncAdminMixin:
     """
 
     def sync_with_scrapyd(self):
-        scrapyd_api.sync_nodes()
+        return scrapyd_api.sync_nodes()
 
     def _wrap_view(self, view):
         @wraps(view)
         def wrapper(request, *args, **kwargs):
             try:
                 # 每次进入 admin 页面时都会触发
-                self.sync_with_scrapyd()
+                error = self.sync_with_scrapyd()
+                if error:
+                    raise Exception(error)
+                self.message_user(request, "同步Scrapyd数据成功", level=messages.SUCCESS)
             except Exception as e:
                 logger.error(f"[scrapyd sync error]: {e}")
+                self.message_user(request, f"同步Scrapyd数据失败: {e}", level=messages.ERROR)
             return view(request, *args, **kwargs)
         return wrapper
 
@@ -140,7 +144,11 @@ class NodeAdmin(admin.ModelAdmin):
     linked_url.short_description = "Scrapyd地址"
 
     def daemon_status(self, obj: models.Node):
-        return scrapyd_api.daemon_status(obj).get("status") == "ok"
+        try:
+            return scrapyd_api.daemon_status(obj, timeout=0.5).get("status") == "ok"
+        except Exception as e:
+            logger.error(f"[scrapyd sync error]: {e}")
+            return False
     daemon_status.short_description = "状态"
     daemon_status.boolean = True
 
@@ -605,7 +613,7 @@ class JobAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
         return False
 
     def sync_with_scrapyd(self):
-        scrapyd_api.sync_nodes(with_jobs=True)
+        return scrapyd_api.sync_nodes(with_jobs=True)
 
     def job_node(self, obj: models.Job):
         return obj.node.name
