@@ -80,6 +80,21 @@ INSTALLED_APPS = [
 3. 系统会定期同步数据，也可以手动触发同步
 4. 部署新版本时，需要提供正确的 egg 文件路径
 
+
+## 下个版本规划
+
+- [ ] **Guardian 信号机制**  
+  - 在项目发布版本时发送 `pre_publish` / `post_publish` 信号  
+  - 在爬虫任务启动、结束时发送 `pre_job_start` / `post_job_finish` 信号  
+  - 方便外部系统监听并执行自定义逻辑（如通知、审计、自动化处理）
+
+- [ ] **任务指标展示**  
+  - 在任务详情中展示类似 ScrapydWeb 的运行指标：  
+    - `page_nums`（已抓取页面数）  
+    - `item_nums`（已采集 item 数量）  
+  - 支持任务运行中实时刷新
+
+
 ## 贡献指南
 
 欢迎提交 issue 和 pull request 来帮助改进这个项目。

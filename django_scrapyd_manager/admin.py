@@ -8,9 +8,10 @@ from datetime import datetime
 from django.utils.html import format_html
 from django.urls import path
 from django.shortcuts import redirect
-from django.conf import settings
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
+from django.urls import reverse
+from django.utils.functional import lazy
 from . import models
 from . import scrapyd_api
 from . import forms
@@ -18,8 +19,20 @@ import logging
 
 
 admin_project_name = "django_scrapyd_manager"
-admin_prefix = settings.FORCE_SCRIPT_NAME if settings.FORCE_SCRIPT_NAME else ''
-admin_prefix = f"{admin_prefix}/admin"
+# admin_prefix = settings.FORCE_SCRIPT_NAME if settings.FORCE_SCRIPT_NAME else ''
+
+
+def _get_admin_index_url():
+    url = reverse("admin:index")
+    return url.strip('/')
+
+admin_index_url = lazy(_get_admin_index_url, str)
+
+
+def _get_app_index_url():
+    return f"{_get_admin_index_url()}/{admin_project_name}"
+
+app_index_url = lazy(_get_app_index_url, str)
 
 
 logger = logging.getLogger("django_scrapyd_manager")
@@ -134,7 +147,7 @@ class NodeAdmin(admin.ModelAdmin):
     def related_projects(self, obj: models.Node):
         projects = []
         for project in obj.projects.all()[:5]:
-            href = f"{admin_prefix}/{admin_project_name}/{models.Project._meta.model_name}/?node_id={obj.id}"
+            href = f"{app_index_url}/{models.Project._meta.model_name}/?node_id={obj.id}"
             projects.append(f"<a href='{href}'>{project.name}</a>")
         if len(projects) == 5:
             projects.append("···")
@@ -189,13 +202,13 @@ class ProjectAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
     def latest_version(self, obj: models.Project):
         version = obj.latest_version
         if version:
-            href = f"{admin_prefix}/{admin_project_name}/{models.ProjectVersion._meta.model_name}/?id={version.id}"
+            href = f"{app_index_url}/{models.ProjectVersion._meta.model_name}/?id={version.id}"
             return format_html(f'<a href="{href}">{version.pretty}</a>')
         return '-'
     latest_version.short_description = "最新版本"
 
     def related_versions(self, obj: models.Project):
-        href = f"{admin_prefix}/{admin_project_name}/{models.ProjectVersion._meta.model_name}/?project_id={obj.id}"
+        href = f"{app_index_url}/{models.ProjectVersion._meta.model_name}/?project_id={obj.id}"
         return format_html(f'<a href="{href}">{obj.versions.count()}</a>')
     related_versions.short_description = "版本数量"
 
@@ -240,7 +253,7 @@ class ProjectVersionAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
             version_datetime = datetime.fromtimestamp(int(obj.version))
         else:
             version_datetime = obj.version
-        href = f"{admin_prefix}/{admin_project_name}/{models.Spider._meta.model_name}/?version_id={obj.id}"
+        href = f"{app_index_url}/{models.Spider._meta.model_name}/?version_id={obj.id}"
         return format_html(f'<a href="{href}">{obj.version}({version_datetime})</a>')
     linked_version.admin_order_field = "version"
     linked_version.short_description = "版本"
@@ -253,7 +266,7 @@ class ProjectVersionAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
         return super().get_queryset(request).select_related("project", "project__node")
 
     class Media:
-        js = ("admin/js/core.js", "js/spider_group_linked.js")
+        js = ("admin/js/core.js", "admin/js/spider_group_linked.js")
 
 
 class SpiderNodeFilter(ProjectNodeFilter):
@@ -361,7 +374,7 @@ class SpiderAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
         except Exception as e:
             self.message_user(request, f"启动失败: {e}", level=messages.ERROR)
         from django.shortcuts import redirect
-        return redirect(request.META.get("HTTP_REFERER", f"{admin_prefix}/{admin_project_name}/spider/"))
+        return redirect(request.META.get("HTTP_REFERER", f"{app_index_url}/spider/"))
 
     def project_name(self, obj: models.Spider):
         return obj.version.project.name
@@ -379,7 +392,7 @@ class SpiderAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
     def start_spider(self, obj: models.Spider):
         return format_html(
             '<a class="button" href="{}">启动</a>',
-            f"{admin_prefix}/{admin_project_name}/{models.Spider._meta.model_name}/{obj.id}/start/"
+            f"{app_index_url}/{models.Spider._meta.model_name}/{obj.id}/start/"
         )
     start_spider.short_description = "运行"
 
@@ -451,7 +464,7 @@ class SpiderGroupAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
     def related_spiders(self, obj: models.SpiderGroup):
         spiders = []
         for spider in obj.resolved_spiders:
-            href = f"{admin_prefix}/{admin_project_name}/{models.Spider._meta.model_name}/?id={spider.id}"
+            href = f"{app_index_url}/{models.Spider._meta.model_name}/?id={spider.id}"
             spiders.append(f"<a href='{href}'>{spider.name}</a>")
         if len(spiders) == 5:
             spiders.append("···")
@@ -461,7 +474,7 @@ class SpiderGroupAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
     def start_spider_group(self, obj: models.SpiderGroup):
         return format_html(
             '<a class="button" href="{}">启动</a>',
-            f"{admin_prefix}/{admin_project_name}/{models.SpiderGroup._meta.model_name}/{obj.id}/start/"
+            f"{app_index_url}/{models.SpiderGroup._meta.model_name}/{obj.id}/start/"
         )
     start_spider_group.short_description = "运行"
 
@@ -542,10 +555,10 @@ class SpiderGroupAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
         except Exception as e:
             self.message_user(request, f"爬虫组{group.name} -> 启动失败: {e}",
                               level=messages.ERROR)
-        return redirect(request.META.get("HTTP_REFERER", f"{admin_prefix}/{admin_project_name}/{models.SpiderGroup._meta.model_name}/"))
+        return redirect(request.META.get("HTTP_REFERER", f"{app_index_url}/{models.SpiderGroup._meta.model_name}/"))
 
     class Media:
-        js = ("admin/js/core.js", "js/spider_group_linked.js")
+        js = ("admin/js/core.js", f"admin/js/spider_group_linked.js")
 
 
 class JobNodeFilter(ProjectNodeFilter):
@@ -615,12 +628,12 @@ class JobAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
     job_spider.short_description = "爬虫名称"
 
     def job_sample_records(self, obj: models.Job):
-        href = f"{admin_prefix}/{admin_project_name}/{models.JobInfoLog._meta.model_name}/?job={obj.id}"
+        href = f"{app_index_url}/{models.JobInfoLog._meta.model_name}/?job={obj.id}"
         return format_html(f'<a class="button" href="{href}">采样记录({obj.logs.count()})</a>',)
     job_sample_records.short_description = "日志记录"
 
     def job_info(self, obj: models.Job):
-        href = f"{admin_prefix}/{admin_project_name}/{models.JobInfoLog._meta.model_name}/?job={obj.id}"
+        href = f"{app_index_url}/{models.JobInfoLog._meta.model_name}/?job={obj.id}"
         return format_html(f'<a class="button" href="{href}">Job最新状态</a>',)
     job_info.short_description = "Job最新状态"
 
@@ -657,7 +670,7 @@ class JobAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
             self.message_user(request, f"Job日志同步成功 {job.job_id} ({job.spider.name})", level=messages.SUCCESS)
         except Exception as e:
             self.message_user(request, f"Job日志同步失败: {e}", level=messages.ERROR)
-        return redirect(request.META.get("HTTP_REFERER", f"{admin_prefix}/{admin_project_name}/{models.Job._meta.model_name}/"))
+        return redirect(request.META.get("HTTP_REFERER", f"{app_index_url}/{models.Job._meta.model_name}/"))
 
     def stop_job_view(self, request, job_id):
         job = get_object_or_404(models.Job, pk=job_id)
@@ -666,13 +679,13 @@ class JobAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
             self.message_user(request, f"成功停止任务 {job.job_id} ({job.spider.name})", level=messages.SUCCESS)
         except Exception as e:
             self.message_user(request, f"停止任务失败: {e}", level=messages.ERROR)
-        return redirect(request.META.get("HTTP_REFERER", f"{admin_prefix}/{admin_project_name}/{models.Job._meta.model_name}/"))
+        return redirect(request.META.get("HTTP_REFERER", f"{app_index_url}/{models.Job._meta.model_name}/"))
 
     def stop_job(self, obj: models.Job):
         if obj.status == models.JobStatus.RUNNING:  # 可选: 只在运行中显示按钮
             return format_html(
                 '<a class="button" href="{}">停止</a>',
-                f"{admin_prefix}/{admin_project_name}/{models.Job._meta.model_name}/{obj.id}/stop/"
+                f"{app_index_url}/{models.Job._meta.model_name}/{obj.id}/stop/"
             )
         return "-"
     stop_job.short_description = "操作"

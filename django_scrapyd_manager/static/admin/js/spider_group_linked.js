@@ -5,9 +5,24 @@
         let $version = $("#id_version");
         let $spiders = $("#id_spiders_select");
 
+        function getAppIndexUrl(appName) {
+            let path = window.location.pathname;
+            // 匹配 URL 中包含 appName 的部分及其前缀
+            let regex = new RegExp(`(.*/${appName})`);
+            let match = path.match(regex);
+            if (!match) {
+                throw new Error(`Cannot find appName "${appName}" in current URL: ${path}`);
+            }
+            return match[1];
+        }
+
+        // 你的 app 名
+        const appIndexUrl = getAppIndexUrl("django_scrapyd_manager");
+        console.debug("appIndexUrl: " + appIndexUrl)
+
         function loadProjects(nodeId) {
             $.ajax({
-                url: `/admin/django_scrapyd_manager/spidergroup/api/node/${nodeId}/projects/`,
+                url: `${appIndexUrl}/spidergroup/api/node/${nodeId}/projects/`,
                 success: function(data) {
                     $project.empty();
                     $project.append(new Option("---------", ""));
@@ -21,7 +36,7 @@
 
         function loadVersions(projectId) {
             $.ajax({
-                url: `/admin/django_scrapyd_manager/spidergroup/api/project/${projectId}/versions/`,
+                url: `${appIndexUrl}/spidergroup/api/project/${projectId}/versions/`,
                 data: {
                     node_id: $node.val()
                 },
@@ -46,7 +61,7 @@
 
         function loadSpiders(versionId) {
             $.ajax({
-                url: `/admin/django_scrapyd_manager/spidergroup/api/version/spiders/`,
+                url: `${appIndexUrl}/spidergroup/api/version/spiders/`,
                 data: {
                     version_id: versionId,
                     project_id: $project.val(),

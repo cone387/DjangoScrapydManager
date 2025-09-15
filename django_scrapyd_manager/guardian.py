@@ -175,12 +175,16 @@ def guard_objects(objects: list[models.Guardian] = None):
                 "success": True,
                 "logs": logs
             }
+            obj.last_action = logs[0].action if logs else "ok"
         except Exception as e:
             result_mapping[name] = {
                 "success": False,
                 "error": str(e)
             }
             logger.exception(e)
+            obj.last_action = f"error: {e}"[:200]
+        obj.last_check = timezone.now()
+        obj.save()
     return result_mapping
 
 
