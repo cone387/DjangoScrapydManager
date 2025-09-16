@@ -3,14 +3,12 @@ import time
 from typing import Iterable
 from django_scrapyd_manager import models, scrapyd_api
 from django.utils import timezone
-from datetime import timedelta
 from django.db import transaction
 from django.db.utils import IntegrityError
 import logging
 
 
-logger = logging.getLogger(__name__)
-LOCK_EXPIRE = 30
+logger = logging.getLogger("django_scrapyd_manager")
 
 
 class InvalidVersionError(Exception):
@@ -27,6 +25,7 @@ def node_has_project(node: models.Node, project: models.Project) -> bool:
 
 def deploy_project_version(project_version: models.ProjectVersion):
     scrapyd_api.add_version(project_version)
+    scrapyd_api.sync_project_version_spiders(project_version)
 
 
 def missing_spiders_jobs_on_node(required_spiders: Iterable[models.Spider], node: models.Node) -> Iterable[models.Spider]:
@@ -72,7 +71,6 @@ class GuardSpiderGroup:
 
 def acquire_guardian_lock(name="default") -> models.GuardianLock | None:
     now = timezone.now()
-    expire_time = now - timedelta(seconds=LOCK_EXPIRE)
     try:
         with transaction.atomic():
             # 尝试创建新锁
@@ -81,11 +79,33 @@ def acquire_guardian_lock(name="default") -> models.GuardianLock | None:
         # 已经有锁，看看是否超时
         with transaction.atomic():
             lock = models.GuardianLock.objects.select_for_update().get(name=name)
-            if lock.heartbeat < expire_time:
+            if lock.is_expired:
                 # 锁过期 → 抢占
                 lock.locked_at = now
                 lock.heartbeat = now
                 lock.save(update_fields=["locked_at", "heartbeat"])
+                return lock
+            expire_time = lock.expired_time
+            last_heartbeat = lock.heartbeat
+        # 非阻塞等待，看看 heartbeat 有没有更新
+        while timezone.now() < expire_time:
+            time.sleep(1)
+            logger.debug(f"Guardian lock acquired at {timezone.now()}, expire at {expire_time}, waiting...")
+            latest_heartbeat = models.GuardianLock.objects.get(pk=lock.pk).heartbeat
+            if latest_heartbeat > last_heartbeat:
+                # holder 还活着 → 放弃接管
+                logger.info("Guardian lock heartbeat updated, another guardian is still running, exit.")
+                return None
+
+        logger.info("Guardian lock heartbeat timeout, trying to acquire lock...")
+        # 超时，认为 holder 挂了 → 抢占
+        with transaction.atomic():
+            lock = models.GuardianLock.objects.select_for_update().get(name=name)
+            if lock.heartbeat == last_heartbeat:  # 确认没更新
+                lock.locked_at = now
+                lock.heartbeat = now
+                lock.save(update_fields=["locked_at", "heartbeat"])
+                logger.info("Guardian lock acquired after timeout.")
                 return lock
         return None
 
@@ -114,33 +134,34 @@ def get_group_publishable_version(spider_group: models.SpiderGroup) -> models.Pr
 
 
 def guard_object(spider_guardian: models.Guardian):
+    logs = []
     node = spider_guardian.spider_group.node
+    if not node_has_project(node, spider_guardian.spider_group.project):
+        log = models.GuardianLog(
+            guardian=spider_guardian,
+            node=node,
+            group=spider_guardian.spider_group,
+            action=models.GuardianAction.PUBLISH_VERSION,
+            reason=f"node({node})上没有该项目:{spider_guardian.spider_group.project}"
+        )
+        try:
+            version = get_group_publishable_version(spider_guardian.spider_group)
+        except InvalidVersionError as e:
+            log.success = False
+            log.message = str(e)
+        else:
+            try:
+                deploy_project_version(version)
+            except Exception as e:
+                log.success = False
+                log.message = traceback.format_exc()
+                logger.exception(e)
+        log.save()
+        logs.append(log)
     guard_spiders = spider_guardian.spider_group.resolved_spiders
     missing_spiders = missing_spiders_jobs_on_node(guard_spiders, node)
-    logs = []
+
     if missing_spiders:
-        if not node_has_project(node, spider_guardian.spider_group.project):
-            log = models.GuardianLog(
-                guardian=spider_guardian,
-                node=node,
-                group=spider_guardian.spider_group,
-                action=models.GuardianAction.PUBLISH_VERSION,
-                reason=f"node({node})上没有该项目:{spider_guardian.spider_group.project}"
-            )
-            try:
-                version = get_group_publishable_version(spider_guardian.spider_group)
-            except InvalidVersionError as e:
-                log.success = False
-                log.message = str(e)
-            else:
-                try:
-                    deploy_project_version(version)
-                except Exception as e:
-                    log.success = False
-                    log.message = traceback.format_exc()
-                    logger.exception(e)
-            log.save()
-            logs.append(log)
         for spider in missing_spiders:
             # 依次记录每个爬虫的启动状态
             log = models.GuardianLog(
@@ -209,7 +230,10 @@ def log_guard_results(result_mapping: dict, echo: int):
 
     for name, result in result_mapping.items():
         success = result.get("success", False)
-        status_text = "SUCCESS" if success else "FAILED"
+        if not success or result.get("logs"):
+            status_text = "🔴 异常"
+        else:
+            status_text = "🟢 正常"
         color = COLORS["GREEN"] if success else COLORS["RED"]
         reset = COLORS["RESET"]
 
@@ -218,7 +242,6 @@ def log_guard_results(result_mapping: dict, echo: int):
 
         if success and "logs" in result:
             for log in result["logs"]:
-                # log 是 GuardianLog 模型实例
                 action = log.action
                 spider_display = log.spider_name or (log.spider.name if log.spider else "")
                 msg = log.message or ""

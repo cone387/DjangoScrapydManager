@@ -2,9 +2,7 @@ import time
 
 from django import forms
 from django.core.exceptions import ValidationError
-
 from . import models
-from . import scrapyd_api
 from .models import Project
 
 ALLOWED_SCRAPY_CUSTOM_SETTINGS = {
@@ -200,12 +198,10 @@ class ProjectVersionForm(forms.ModelForm):
             try:
                 default_node = models.Node.default_node()
                 self.fields["node"].initial = default_node
-                project.queryset = default_node.projects.filter(scrapyd_exists=True)
+                project.widget.choices = [(p.pk, p.name) for p in default_node.projects.all()]
                 project.initial = project.queryset.first()
             except models.Node.DoesNotExist:
                 pass
-        else:
-            project.queryset = instance.project.node.projects.all()
         if self.instance.pk:
             self.instance: models.ProjectVersion
             self.fields["node"].initial = self.instance.project.node
@@ -227,11 +223,6 @@ class ProjectVersionForm(forms.ModelForm):
         node = cleaned_data.pop("node")
         if node != cleaned_data["project"].node:
             raise ValidationError("node和project所在node不一致")
-        obj = models.ProjectVersion(**cleaned_data)
-        ret = scrapyd_api.add_version(obj)
-        status = ret.get("status")
-        if status == "error":
-            raise ValidationError(ret.get("message"))
         return cleaned_data
 
     class Meta:

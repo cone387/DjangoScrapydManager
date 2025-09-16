@@ -24,15 +24,15 @@ admin_project_name = "django_scrapyd_manager"
 
 def _get_admin_index_url():
     url = reverse("admin:index")
-    return url.strip('/')
+    return url.rstrip('/')
 
-admin_index_url = lazy(_get_admin_index_url, str)
+admin_index_url = lazy(_get_admin_index_url, str)()
 
 
 def _get_app_index_url():
     return f"{_get_admin_index_url()}/{admin_project_name}"
 
-app_index_url = lazy(_get_app_index_url, str)
+app_index_url = lazy(_get_app_index_url, str)()
 
 
 logger = logging.getLogger("django_scrapyd_manager")
@@ -238,7 +238,7 @@ class VersionProjectFilter(ProjectFilter):
 @admin.register(models.ProjectVersion)
 class ProjectVersionAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
     list_display = ("id", "linked_version", "project", "spider_count", "has_egg_file", "description", "scrapyd_exists", "sync_mode", "sync_status", "is_spider_synced", "create_time")
-    readonly_fields = ("sync_status", "is_spider_synced", "create_time", "update_time")
+    readonly_fields = ("is_spider_synced", "create_time", "update_time")
     list_filter = (VersionNodeFilter, VersionProjectFilter)
     form = forms.ProjectVersionForm
     fields = (
@@ -360,7 +360,8 @@ class SpiderAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
     def has_delete_permission(self, request, obj: models.Spider = None):
         if obj is None:
             return False
-        return obj.version.sync_mode != models.SyncMode.NONE
+        return True
+        # return obj.version.sync_mode != models.SyncMode.NONE
 
     def get_urls(self):
 
@@ -529,14 +530,14 @@ class SpiderGroupAdmin(ScrapydSyncAdminMixin, admin.ModelAdmin):
 
     @staticmethod
     def get_projects(request, node_id):
-        projects = models.Project.objects.filter(node_id=node_id, scrapyd_exists=True)
+        projects = models.Project.objects.filter(node_id=node_id)
         data = [{"id": p.id, "text": p.name} for p in projects]
         return JsonResponse(data, safe=False)
 
     @staticmethod
     def get_versions(request, project_id):
         if project_id:
-            versions = models.ProjectVersion.objects.filter(project_id=project_id, scrapyd_exists=True).order_by("-create_time")
+            versions = models.ProjectVersion.objects.filter(project_id=project_id).order_by("-create_time")
         else:
             node_id = request.GET.get("node_id")
             versions = models.ProjectVersion.objects.filter(project__node_id=node_id).order_by("-create_time")
@@ -754,12 +755,17 @@ class JobInfoLogAdmin(admin.ModelAdmin):
 @admin.register(models.GuardianLock)
 class GuardianLockAdmin(admin.ModelAdmin):
     list_display = (
-        "id", "name", "echo", "guard_interval", "heartbeat", "locked_at", "create_time",
+        "id", "name", "echo", "guard_interval", "heartbeat", "status", "locked_at", "create_time",
     )
 
     readonly_fields = (
         "name", "echo", "heartbeat", "locked_at", "create_time",
     )
+
+    def status(self, obj: models.GuardianLock):
+        return not obj.is_expired
+    status.boolean = True
+    status.short_description = "状态"
 
 
 @admin.register(models.Guardian)

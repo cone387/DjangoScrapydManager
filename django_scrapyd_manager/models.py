@@ -1,6 +1,6 @@
 # scrapyd_manager/models.py
 from __future__ import annotations
-from datetime import datetime
+from datetime import datetime, timedelta
 from django.core.validators import RegexValidator
 from django.db import models
 from django.utils import timezone
@@ -117,7 +117,10 @@ class ProjectVersion(models.Model):
 
     @property
     def short_path(self):
-        return f"{self.version}({self.pretty})"
+        pretty = self.pretty
+        if pretty != self.version:
+            return f"{self.version}({self.pretty})"
+        return self.version
 
     class Meta:
         db_table = "scrapy_project_version"
@@ -314,6 +317,14 @@ class GuardianLock(models.Model):
     heartbeat = models.DateTimeField(default=timezone.now, verbose_name="上一次心跳")
     create_time = models.DateTimeField(default=timezone.now, verbose_name="创建时间")
     update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+
+    @property
+    def is_expired(self):
+        return self.expired_time < timezone.now()
+
+    @property
+    def expired_time(self):
+        return self.heartbeat + timedelta(seconds=self.guard_interval * 2)
 
     class Meta:
         db_table = "scrapy_guardian_lock"
