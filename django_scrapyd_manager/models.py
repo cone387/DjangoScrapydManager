@@ -4,8 +4,10 @@ from datetime import datetime, timedelta
 from django.core.validators import RegexValidator
 from django.db import models
 from django.utils import timezone
+from django.utils.deconstruct import deconstructible
 from .utils import get_md5
 import json
+import os
 
 
 class Node(models.Model):
@@ -91,11 +93,19 @@ class Project(models.Model):
         return self.name
 
 
+@deconstructible
+class EggPath:
+    def __call__(self, instance, filename):
+        # 始终用项目名+版本号作为文件名
+        base, ext = os.path.splitext(filename)
+        return f"eggs/{instance.project.name}/{instance.version}{ext}"
+
+
 class ProjectVersion(models.Model):
     project = models.ForeignKey(Project, on_delete=models.CASCADE, verbose_name="项目", db_constraint=False, related_name="versions")
     version = models.CharField(max_length=255, verbose_name='版本')
     is_spider_synced = models.BooleanField(default=False, verbose_name="是否已同步当前版本爬虫")
-    egg_file = models.FileField(upload_to="eggs/", null=True, blank=True, verbose_name="Egg 文件")
+    egg_file = models.FileField(upload_to=EggPath(), null=True, blank=True, verbose_name="Egg 文件")
     description = models.CharField(max_length=200, null=True, blank=True, verbose_name="描述")
     sync_mode = models.CharField(max_length=10, choices=SyncMode.choices, default=SyncMode.AUTO, verbose_name="同步模式")
     scrapyd_exists = models.BooleanField(default=False, verbose_name="在Scrapyd中存在")
