@@ -1,6 +1,6 @@
 import traceback
 from typing import Iterable
-from django_scrapyd_manager import models, scrapyd_api
+from django_scrapyd_manager import models, scrapyd_api, signals
 from django.utils import timezone
 from django_sched.sched import BaseScheduler
 
@@ -136,6 +136,7 @@ class GuardianScheduler(BaseScheduler):
         objects = objects or models.Guardian.objects.filter(enable=True).prefetch_related("spider_group",
                                                                                           "spider_group__node",
                                                                                           "spider_group__project")
+        signals.guard_objects_started.send(sender=self, objects=objects)
         result_mapping = {}
         for obj in objects:
             name = (obj.description or "")[:20] or f"爬虫组守护{obj.spider_group.name}"
@@ -146,6 +147,7 @@ class GuardianScheduler(BaseScheduler):
                     "logs": logs
                 }
                 obj.last_action = logs[0].action if logs else "ok"
+                signals.guard_obj_success.send(sender=self, model=obj, logs=logs)
             except Exception as e:
                 result_mapping[name] = {
                     "success": False,
@@ -153,6 +155,7 @@ class GuardianScheduler(BaseScheduler):
                 }
                 self.logger.exception(e)
                 obj.last_action = f"error: {e}"[:200]
+                signals.guard_obj_error.send(sender=self, model=obj, exception=e)
             obj.last_check = timezone.now()
             obj.save()
         return result_mapping
@@ -207,3 +210,4 @@ class GuardianScheduler(BaseScheduler):
     def schedule(self, now):
         result_mapping = self.guard_objects()
         self.log_guard_results(result_mapping)
+        signals.guard_objects_ended.send(sender=self, result=result_mapping)

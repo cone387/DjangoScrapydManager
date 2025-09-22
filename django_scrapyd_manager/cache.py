@@ -3,6 +3,7 @@ from functools import wraps
 from django.core.cache import cache
 from django.http import HttpRequest
 from django.contrib.admin import ModelAdmin
+import hashlib, pickle
 
 _global_cache = {}
 _sentinel = object()
@@ -43,7 +44,7 @@ def ttl_cache(ttl: int = 60):
 
 
 def django_ttl_cache(ttl=10, prefix="ttl_cache"):
-    import hashlib, pickle
+
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
