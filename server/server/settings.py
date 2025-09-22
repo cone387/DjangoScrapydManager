@@ -27,6 +27,13 @@ DEBUG = True
 
 ALLOWED_HOSTS = []
 
+DJANGO_SCHED = {
+    "SCHEDULERS": {
+        "django_scrapyd_manager.guardian.GuardianScheduler": {}
+    },
+    "LOGGING_LEVEL": "ERROR",
+}
+
 
 # Application definition
 
@@ -37,6 +44,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django_sched',
     'django_scrapyd_manager'
 ]
 

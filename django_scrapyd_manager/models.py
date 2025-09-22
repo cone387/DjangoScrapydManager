@@ -316,31 +316,6 @@ class GuardianStrategy(models.TextChoices):
     RESTART_ALWAYS = "restart_always", "始终重启"
 
 
-class GuardianLock(models.Model):
-    """
-    用来保证同一时间只有一个 guardian 循环在运行
-    """
-    name = models.CharField(max_length=50, unique=True, default="default", verbose_name="锁名字")
-    echo = models.IntegerField(default=0, verbose_name="运行轮次")
-    guard_interval = models.IntegerField(default=60, verbose_name="监控周期(秒)")
-    locked_at = models.DateTimeField(default=timezone.now, verbose_name="锁创建时间")
-    heartbeat = models.DateTimeField(default=timezone.now, verbose_name="上一次心跳")
-    create_time = models.DateTimeField(default=timezone.now, verbose_name="创建时间")
-    update_time = models.DateTimeField(auto_now=True, verbose_name="更新时间")
-
-    @property
-    def is_expired(self):
-        return self.expired_time < timezone.now()
-
-    @property
-    def expired_time(self):
-        return self.heartbeat + timedelta(seconds=self.guard_interval * 2)
-
-    class Meta:
-        db_table = "scrapy_guardian_lock"
-        verbose_name = verbose_name_plural = "Scrapy Guardian Lock"
-
-
 class Guardian(models.Model):
     spider_group = models.ForeignKey(SpiderGroup, null=True, blank=True, on_delete=models.CASCADE, verbose_name="爬虫组", db_constraint=False)
     strategy = models.CharField(max_length=20, choices=GuardianStrategy.choices, default=GuardianStrategy.RESTART_ALWAYS, verbose_name="守护策略")

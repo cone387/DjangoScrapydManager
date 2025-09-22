@@ -7,6 +7,7 @@ requires-python = ">=3.13"
 dependencies = [
     "django>=5.2.5",
     "requests>=2.32.4",
+    "django-sched>=0.1.1",
 ]
 authors = [
     { name = "Cone387", email = "1183008540@qq.com" },

@@ -752,22 +752,6 @@ class JobInfoLogAdmin(admin.ModelAdmin):
         return super().get_queryset(request).prefetch_related("job")
 
 
-@admin.register(models.GuardianLock)
-class GuardianLockAdmin(admin.ModelAdmin):
-    list_display = (
-        "id", "name", "echo", "guard_interval", "heartbeat", "status", "locked_at", "create_time",
-    )
-
-    readonly_fields = (
-        "name", "echo", "heartbeat", "locked_at", "create_time",
-    )
-
-    def status(self, obj: models.GuardianLock):
-        return not obj.is_expired
-    status.boolean = True
-    status.short_description = "状态"
-
-
 @admin.register(models.Guardian)
 class GuardianAdmin(admin.ModelAdmin):
     list_display = (
